@@ -836,7 +836,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.6";
+        public const string AppVersion = "1.2.7";
 
         public static int CompareVersion(string a, string b)
         {
@@ -1019,21 +1019,15 @@ namespace LabelPrinterApp
             _settingsPath = Path.Combine(_dataDir, "设置.ini");
             _settings.Path = _settingsPath;
             _settings.Load();
-            _history = new HistoryStore(_historyPath);
-            _records.AddRange(_history.Load());
-            if (_records.Count == 0)
+            // 首次：若今天的日期文件不存在但存在旧的单文件，则把旧文件更名为今天的日期文件（一次性迁移，避免重复并入每一天）
+            if (!File.Exists(_historyPath))
             {
                 string legacy = Path.Combine(_dataDir, "历史记录.csv");
                 if (File.Exists(legacy))
-                {
-                    var legacyRecs = new HistoryStore(legacy).Load();
-                    if (legacyRecs.Count > 0)
-                    {
-                        _records.AddRange(legacyRecs);
-                        try { _history.Save(_records); } catch { }
-                    }
-                }
+                    try { File.Move(legacy, _historyPath); } catch { }
             }
+            _history = new HistoryStore(_historyPath);
+            _records.AddRange(_history.Load());
 
             BuildUi2();
             RefreshPrinters(true);
