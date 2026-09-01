@@ -836,7 +836,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.5";
+        public const string AppVersion = "1.2.6";
 
         public static int CompareVersion(string a, string b)
         {
@@ -1015,12 +1015,25 @@ namespace LabelPrinterApp
             StartPosition = FormStartPosition.CenterScreen;
 
             _dataDir = GetDataDir();
-            _historyPath = Path.Combine(_dataDir, "历史记录.csv");
+            _historyPath = Path.Combine(_dataDir, "历史记录_" + DateTime.Now.ToString("yyyy-MM-dd") + ".csv");
             _settingsPath = Path.Combine(_dataDir, "设置.ini");
             _settings.Path = _settingsPath;
             _settings.Load();
             _history = new HistoryStore(_historyPath);
             _records.AddRange(_history.Load());
+            if (_records.Count == 0)
+            {
+                string legacy = Path.Combine(_dataDir, "历史记录.csv");
+                if (File.Exists(legacy))
+                {
+                    var legacyRecs = new HistoryStore(legacy).Load();
+                    if (legacyRecs.Count > 0)
+                    {
+                        _records.AddRange(legacyRecs);
+                        try { _history.Save(_records); } catch { }
+                    }
+                }
+            }
 
             BuildUi2();
             RefreshPrinters(true);
@@ -1637,7 +1650,7 @@ namespace LabelPrinterApp
             var lblRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
             lblToday = new Label { Text = "今日已打印：0 台", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), ForeColor = Color.SeaGreen, Margin = new Padding(0, 2, 24, 0) };
             lblRow.Controls.Add(lblToday);
-            lblRow.Controls.Add(new Label { Text = "记录保存在 数据\\历史记录.csv，可用 Excel 打开", AutoSize = true, ForeColor = Color.Gray });
+            lblRow.Controls.Add(new Label { Text = "记录按天保存：数据\\历史记录_日期.csv（每天一个新文件）", AutoSize = true, ForeColor = Color.Gray });
             t.Controls.Add(lblRow, 0, 1); t.SetColumnSpan(lblRow, 2);
 
             g.Controls.Add(t);
@@ -1852,12 +1865,24 @@ namespace LabelPrinterApp
 
         private bool AddRecord(DeviceRecord rec)
         {
+            EnsureCurrentDayFile();
             bool dup = !string.IsNullOrEmpty(rec.SN) && !string.IsNullOrEmpty(rec.MAC) &&
                        _records.Any(r => r.SN == rec.SN && r.MAC == rec.MAC);
             _records.Insert(0, rec);
             SaveAll();
             LoadHistoryGrid();
             return dup;
+        }
+
+        private void EnsureCurrentDayFile()
+        {
+            string todayPath = Path.Combine(_dataDir, "历史记录_" + DateTime.Now.ToString("yyyy-MM-dd") + ".csv");
+            if (string.Equals(todayPath, _historyPath, StringComparison.OrdinalIgnoreCase)) return;
+            _historyPath = todayPath;
+            _history = new HistoryStore(_historyPath);
+            _records.Clear();
+            _records.AddRange(_history.Load());
+            LoadHistoryGrid();
         }
 
         private DeviceRecord SelectedRecord()
