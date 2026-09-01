@@ -836,7 +836,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.7";
+        public const string AppVersion = "1.2.8";
 
         public static int CompareVersion(string a, string b)
         {
@@ -975,7 +975,10 @@ namespace LabelPrinterApp
         private PictureBox picPreview;
         private Button btnResetLayout;
         private DataGridView grid;
+        private TextBox txtSearch;
+        private Label lblCount;
         private Timer _refreshTimer;
+        private string _searchText = "";
 
         private enum ScanState { AwaitQR, AwaitSN, AwaitMAC }
         private ScanState _scanState = ScanState.AwaitQR;
@@ -1606,11 +1609,20 @@ namespace LabelPrinterApp
         private GroupBox BuildHistoryGroup()
         {
             var g = new GroupBox { Text = "历史记录（自动保存，双击可重印）", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = Padding.Empty };
-            var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(0), Margin = Padding.Empty };
+            var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 176));
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var searchRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            searchRow.Controls.Add(new Label { Text = "查找(SN/MAC)：", AutoSize = true, Margin = new Padding(0, 3, 6, 6) });
+            txtSearch = new TextBox { Width = 240, Margin = new Padding(0, 0, 8, 6), Anchor = AnchorStyles.Left };
+            txtSearch.TextChanged += (s, e) => { _searchText = txtSearch.Text.Trim(); LoadHistoryGrid(); };
+            searchRow.Controls.Add(txtSearch);
+            searchRow.Controls.Add(new Label { Text = "可输完整 SN/MAC 或后几位", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 3, 0, 6) });
+            t.Controls.Add(searchRow, 0, 0); t.SetColumnSpan(searchRow, 2);
 
             grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, ScrollBars = ScrollBars.Vertical, Margin = new Padding(0, 0, 8, 8) };
             grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
@@ -1621,7 +1633,19 @@ namespace LabelPrinterApp
             grid.Columns.Add("colMAC", "MAC");
             grid.Columns.Add("colPrintTime", "打印时间");
             grid.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) { var tag = grid.Rows[e.RowIndex].Tag as DeviceRecord; if (tag != null) Reprint(tag); } };
-            t.Controls.Add(grid, 0, 0);
+            grid.CellToolTipTextNeeded += (s, e) =>
+            {
+                if (e.RowIndex >= 0 && e.ColumnIndex == 0)
+                {
+                    var rec = grid.Rows[e.RowIndex].Tag as DeviceRecord;
+                    if (rec != null)
+                    {
+                        int dayCount = _records.Count(r => r.Time.Date == rec.Time.Date);
+                        e.ToolTipText = rec.Time.ToString("yyyy-MM-dd") + " 当天共 " + dayCount + " 条记录";
+                    }
+                }
+            };
+            t.Controls.Add(grid, 0, 1);
 
             var btnCol = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
             var btnReprint = new Button { Text = "重印选中", Width = 170, Height = 24, Margin = new Padding(0, 0, 0, 2) };
@@ -1639,13 +1663,15 @@ namespace LabelPrinterApp
             btnCol.Controls.Add(btnClearAll);
             btnCol.Controls.Add(btnFolder);
             btnCol.Controls.Add(btnUpdate);
-            t.Controls.Add(btnCol, 1, 0);
+            t.Controls.Add(btnCol, 1, 1);
 
             var lblRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
             lblToday = new Label { Text = "今日已打印：0 台", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), ForeColor = Color.SeaGreen, Margin = new Padding(0, 2, 24, 0) };
             lblRow.Controls.Add(lblToday);
+            lblCount = new Label { Text = "共 0 条记录", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(0, 2, 24, 0) };
+            lblRow.Controls.Add(lblCount);
             lblRow.Controls.Add(new Label { Text = "记录按天保存：数据\\历史记录_日期.csv（每天一个新文件）", AutoSize = true, ForeColor = Color.Gray });
-            t.Controls.Add(lblRow, 0, 1); t.SetColumnSpan(lblRow, 2);
+            t.Controls.Add(lblRow, 0, 2); t.SetColumnSpan(lblRow, 2);
 
             g.Controls.Add(t);
             return g;
@@ -1898,7 +1924,12 @@ namespace LabelPrinterApp
         {
             grid.SuspendLayout();
             grid.Rows.Clear();
-            foreach (var r in _records)
+            List<DeviceRecord> list = _records;
+            if (!string.IsNullOrEmpty(_searchText))
+                list = _records.Where(r =>
+                    (!string.IsNullOrEmpty(r.SN) && r.SN.IndexOf(_searchText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    (!string.IsNullOrEmpty(r.MAC) && r.MAC.IndexOf(_searchText, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
+            foreach (var r in list)
             {
                 int idx = grid.Rows.Add(
                     r.Time.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -1910,6 +1941,10 @@ namespace LabelPrinterApp
                 grid.Rows[idx].Tag = r;
             }
             grid.ResumeLayout();
+            if (lblCount != null)
+                lblCount.Text = string.IsNullOrEmpty(_searchText)
+                    ? "共 " + _records.Count + " 条记录"
+                    : "共 " + _records.Count + " 条记录（匹配 " + list.Count + " 条）";
         }
 
         private void UpdateTodayCount()
