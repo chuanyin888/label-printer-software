@@ -635,7 +635,8 @@ namespace LabelPrinterApp
         public bool ShowSN = true;
         public bool ShowMAC = true;
         public int LayoutVersion = 6;
-        public string UpdateUrl = "https://github.com/chuanyin888/label-printer-software";
+        public const string DefaultUpdateUrl = "https://github.com/chuanyin888/label-printer-software";
+        public string UpdateUrl = DefaultUpdateUrl;
         public string UpdateToken = "";
         public int BarcodeWidth = 2;   // 0=细  1=中  2=粗
         public List<LayoutItem> Layout = LayoutItem.DefaultLayout(85, 35);
@@ -671,6 +672,7 @@ namespace LabelPrinterApp
                 if (d.ContainsKey("updateUrl")) UpdateUrl = d["updateUrl"];
                 if (d.ContainsKey("updateToken")) UpdateToken = d["updateToken"];
                 if (d.ContainsKey("barcodeWidth")) BarcodeWidth = (int)ParseD(d["barcodeWidth"], BarcodeWidth);
+                if (string.IsNullOrWhiteSpace(UpdateUrl)) UpdateUrl = DefaultUpdateUrl;
                 LabelWidthMm = Math.Max(5, Math.Min(200, LabelWidthMm));
                 LabelHeightMm = Math.Max(5, Math.Min(300, LabelHeightMm));
 
@@ -834,7 +836,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.4";
+        public const string AppVersion = "1.2.5";
 
         public static int CompareVersion(string a, string b)
         {
