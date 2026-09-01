@@ -167,7 +167,7 @@ namespace LabelPrinterApp
             };
             var items = LayoutItem.DefaultLayout(85, 35);
             List<string> warnings;
-            var bmp = LabelRenderer.Render(rec, 85, 35, 203, items, out warnings);
+            var bmp = LabelRenderer.Render(rec, 85, 35, 203, items, out warnings, false);
             bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
             bmp.Dispose();
         }
@@ -517,14 +517,19 @@ namespace LabelPrinterApp
             }
         }
 
-        public static string TextFor(LayoutItem it, DeviceRecord r)
+        public static string PlaceholderBarcode(LayoutItem it)
+        {
+            return it.Id == "sn_barcode" ? "SN12345678901" : "1234567890AB";
+        }
+
+        public static string TextFor(LayoutItem it, DeviceRecord r, bool placeholder)
         {
             switch (it.Id)
             {
                 case "model_text": return "型号：" + r.Model;
                 case "type_text": return "类型：" + r.Type;
-                case "sn_text": return "SN：" + r.SN;
-                case "mac_text": return "MAC：" + r.MAC;
+                case "sn_text": return "SN：" + (placeholder && string.IsNullOrEmpty(r.SN) ? "SN12345678901" : r.SN);
+                case "mac_text": return "MAC：" + (placeholder && string.IsNullOrEmpty(r.MAC) ? "1234567890AB" : r.MAC);
             }
             return "";
         }
@@ -534,7 +539,7 @@ namespace LabelPrinterApp
             return it.Id == "sn_barcode" ? r.SN : r.MAC;
         }
 
-        public static Bitmap Render(DeviceRecord r, double Wmm, double Hmm, int dpi, List<LayoutItem> items, out List<string> warnings)
+        public static Bitmap Render(DeviceRecord r, double Wmm, double Hmm, int dpi, List<LayoutItem> items, out List<string> warnings, bool placeholder)
         {
             warnings = new List<string>();
             int wPx = MmToPx(Wmm, dpi);
@@ -552,6 +557,7 @@ namespace LabelPrinterApp
                     if (it.IsBarcode)
                     {
                         string data = BarcodeDataFor(it, r);
+                        if (placeholder && string.IsNullOrEmpty(data)) data = PlaceholderBarcode(it);
                         if (string.IsNullOrEmpty(data)) continue;
                         int maxW = wPx - MmToPx(4, dpi) * 2;
                         if (it.MaxWidthMm > 0)
@@ -566,7 +572,7 @@ namespace LabelPrinterApp
                     }
                     else
                     {
-                        string text = TextFor(it, r);
+                        string text = TextFor(it, r, placeholder);
                         if (string.IsNullOrEmpty(text)) continue;
                         using (var f = MakeFont((float)it.FontSizePt, it.Bold))
                         using (var fmt = new StringFormat())
@@ -589,8 +595,7 @@ namespace LabelPrinterApp
             if (it.IsBarcode)
             {
                 string data = BarcodeDataFor(it, r);
-                if (string.IsNullOrEmpty(data))
-                    return new RectangleF(MmToPx(it.Xmm, dpi) - 30, MmToPx(it.Ymm, dpi), 60, 20);
+                if (string.IsNullOrEmpty(data)) data = PlaceholderBarcode(it);
                 int maxW = wPx - MmToPx(4, dpi) * 2;
                 if (it.MaxWidthMm > 0)
                     maxW = Math.Min(maxW, MmToPx(it.MaxWidthMm, dpi));
@@ -602,7 +607,7 @@ namespace LabelPrinterApp
             }
             else
             {
-                string text = TextFor(it, r);
+                string text = TextFor(it, r, true);
                 using (var f = MakeFont((float)it.FontSizePt, it.Bold))
                 {
                     using (var bmp = new Bitmap(1, 1))
@@ -824,7 +829,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.0";
+        public const string AppVersion = "1.2.1";
 
         public static int CompareVersion(string a, string b)
         {
@@ -1712,7 +1717,7 @@ namespace LabelPrinterApp
             }
 
             List<string> warnings;
-            var bmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings);
+            var bmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings, false);
             bool printed = PrintBitmap(rec, cmbPrinter.Text);
             bmp.Dispose();
             if (!printed) return;
@@ -1755,7 +1760,7 @@ namespace LabelPrinterApp
                 return;
             }
             List<string> warnings;
-            var bmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings);
+            var bmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings, false);
             bool printed = PrintBitmap(rec, cmbPrinter.Text);
             bmp.Dispose();
             if (!printed) return;
@@ -1792,7 +1797,7 @@ namespace LabelPrinterApp
                         g.CompositingQuality = CompositingQuality.HighSpeed;
                         int dpi = (int)Math.Round(g.DpiX > 0 ? g.DpiX : _settings.Dpi);
                         List<string> w;
-                        using (var rbmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, dpi, _settings.Layout, out w))
+                        using (var rbmp = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, dpi, _settings.Layout, out w, false))
                         {
                             g.DrawImage(rbmp, e.MarginBounds);
                         }
@@ -2015,7 +2020,7 @@ namespace LabelPrinterApp
                 var rec = CurrentRecord();
                 List<string> warnings;
                 var old = _labelBitmap;
-                _labelBitmap = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings);
+                _labelBitmap = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings, true);
                 if (picPreview != null) picPreview.Image = _labelBitmap;
                 if (old != null) old.Dispose();
                 int wpx = LabelRenderer.MmToPx(_settings.LabelWidthMm, _settings.Dpi);
@@ -2139,13 +2144,13 @@ namespace LabelPrinterApp
             {
                 lblSel.Text = it.Name;
                 numFont.Enabled = !it.IsBarcode;
-                numFont.Value = (decimal)it.FontSizePt;
+                numFont.Value = Math.Max(numFont.Minimum, Math.Min(numFont.Maximum, (decimal)it.FontSizePt));
                 numX.Enabled = true;
-                numX.Value = (decimal)it.Xmm;
+                numX.Value = Math.Max(numX.Minimum, Math.Min(numX.Maximum, (decimal)it.Xmm));
                 numY.Enabled = true;
-                numY.Value = (decimal)it.Ymm;
+                numY.Value = Math.Max(numY.Minimum, Math.Min(numY.Maximum, (decimal)it.Ymm));
                 numBarcodeH.Enabled = it.IsBarcode;
-                numBarcodeH.Value = (decimal)it.HeightMm;
+                numBarcodeH.Value = Math.Max(numBarcodeH.Minimum, Math.Min(numBarcodeH.Maximum, (decimal)it.HeightMm));
                 chkItemVisible.Enabled = true;
                 chkItemVisible.Checked = it.Visible;
             }
