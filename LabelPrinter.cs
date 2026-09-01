@@ -836,7 +836,8 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.9";
+        public const string AppVersion = "1.2.10";
+        public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
         {
@@ -860,10 +861,10 @@ namespace LabelPrinterApp
             return parts;
         }
 
-        public static bool FindNewVersion(string url, string token, string current, out string newVersion, out string downloadUrl, out string notes)
+        public static UpdateCheckResult FindNewVersion(string url, string token, string current, out string newVersion, out string downloadUrl, out string notes)
         {
             newVersion = ""; downloadUrl = ""; notes = "";
-            if (string.IsNullOrWhiteSpace(url)) return false;
+            if (string.IsNullOrWhiteSpace(url)) return UpdateCheckResult.Error;
             try
             {
                 string json;
@@ -871,7 +872,7 @@ namespace LabelPrinterApp
                 {
                     json = GetGitHubReleaseJson(url, token);
                     var obj = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
-                    if (obj == null) return false;
+                    if (obj == null) return UpdateCheckResult.Error;
                     newVersion = obj.ContainsKey("tag_name") && obj["tag_name"] != null ? obj["tag_name"].ToString() : "";
                     if (obj.ContainsKey("body") && obj["body"] != null) notes = obj["body"].ToString();
                     var assets = obj.ContainsKey("assets") && obj["assets"] != null ? obj["assets"] as object[] : null;
@@ -894,16 +895,17 @@ namespace LabelPrinterApp
                 {
                     json = Get(url, token);
                     var obj = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
-                    if (obj == null) return false;
+                    if (obj == null) return UpdateCheckResult.Error;
                     newVersion = GetS(obj, "version");
                     downloadUrl = GetS(obj, "download");
                     if (downloadUrl == "") downloadUrl = GetS(obj, "url");
                     notes = GetS(obj, "notes");
                 }
-                return !string.IsNullOrEmpty(newVersion) && !string.IsNullOrEmpty(downloadUrl) &&
-                       CompareVersion(newVersion, current) > 0;
+                if (string.IsNullOrEmpty(newVersion) || string.IsNullOrEmpty(downloadUrl))
+                    return UpdateCheckResult.NoUpdate;
+                return CompareVersion(newVersion, current) > 0 ? UpdateCheckResult.UpdateAvailable : UpdateCheckResult.NoUpdate;
             }
-            catch { return false; }
+            catch { return UpdateCheckResult.Error; }
         }
 
         private static string GetS(Dictionary<string, object> d, string k)
@@ -1057,8 +1059,14 @@ namespace LabelPrinterApp
             try
             {
                 string nv, dl, notes;
-                var has = Updater.FindNewVersion(_settings.UpdateUrl, _settings.UpdateToken, Updater.AppVersion, out nv, out dl, out notes);
-                if (!has)
+                var res = Updater.FindNewVersion(_settings.UpdateUrl, _settings.UpdateToken, Updater.AppVersion, out nv, out dl, out notes);
+                if (res == Updater.UpdateCheckResult.Error)
+                {
+                    if (interactive)
+                        MessageBox.Show("检查更新失败：无法连接更新服务器，请检查网络后重试。", "更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                if (res == Updater.UpdateCheckResult.NoUpdate)
                 {
                     if (interactive) SetStatus("已是最新版本（v" + Updater.AppVersion + "）", Color.SeaGreen);
                     return;
@@ -1092,8 +1100,8 @@ namespace LabelPrinterApp
                 try
                 {
                     string nv, dl, notes;
-                    var has = Updater.FindNewVersion(_settings.UpdateUrl, _settings.UpdateToken, Updater.AppVersion, out nv, out dl, out notes);
-                    if (has && !IsDisposed)
+                    var res = Updater.FindNewVersion(_settings.UpdateUrl, _settings.UpdateToken, Updater.AppVersion, out nv, out dl, out notes);
+                    if (res == Updater.UpdateCheckResult.UpdateAvailable && !IsDisposed)
                         BeginInvoke((Action)(() =>
                         {
                             if (MessageBox.Show("发现新版本 v" + nv + "（当前 v" + Updater.AppVersion + "）。是否下载并更新？\n\n" + notes, "发现新版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
