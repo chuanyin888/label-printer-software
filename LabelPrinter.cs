@@ -527,8 +527,8 @@ namespace LabelPrinterApp
         {
             switch (it.Id)
             {
-                case "model_text": return "型号：" + r.Model;
-                case "type_text": return "类型：" + r.Type;
+                case "model_text": return "型号：" + (placeholder && string.IsNullOrEmpty(r.Model) ? "ZXHN F677V2" : r.Model);
+                case "type_text": return "类型：" + (placeholder && string.IsNullOrEmpty(r.Type) ? "GPON" : r.Type);
                 case "sn_text": return "SN：" + (placeholder && string.IsNullOrEmpty(r.SN) ? "SN12345678901" : r.SN);
                 case "mac_text": return "MAC：" + (placeholder && string.IsNullOrEmpty(r.MAC) ? "1234567890AB" : r.MAC);
             }
@@ -834,7 +834,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.3";
+        public const string AppVersion = "1.2.4";
 
         public static int CompareVersion(string a, string b)
         {
@@ -982,6 +982,9 @@ namespace LabelPrinterApp
 
         private LayoutItem _selItem;
         private bool _dragging;
+        private bool _moveAll;
+        private double _allStartX, _allStartY;
+        private double[] _allOrigX, _allOrigY;
         private double _dragOffX, _dragOffY;
         private RectangleF _selRect = RectangleF.Empty;
         private bool _suppressProps;
@@ -1573,9 +1576,13 @@ namespace LabelPrinterApp
             chkItemVisible = new CheckBox { Text = "在标签上显示此元素", AutoSize = true, Margin = new Padding(0, 4, 0, 8) };
             t.Controls.Add(chkItemVisible, 0, 5); t.SetColumnSpan(chkItemVisible, 2);
 
+            var chkMoveAll = new CheckBox { Text = "整体移动（一起移动所有元素）", AutoSize = true, Margin = new Padding(0, 2, 0, 6) };
+            chkMoveAll.CheckedChanged += (s, e) => { _moveAll = chkMoveAll.Checked; if (!_moveAll) _dragging = false; };
+            t.Controls.Add(chkMoveAll, 0, 6); t.SetColumnSpan(chkMoveAll, 2);
+
             btnResetLayout = new Button { Text = "恢复默认排版", Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 2) };
             btnResetLayout.Click += (s, e) => { _settings.Layout = LayoutItem.DefaultLayout(_settings.LabelWidthMm, _settings.LabelHeightMm); ApplyChecksToLayout(); UpdatePreview(); SetStatus("已恢复默认排版", Color.Gray); };
-            t.Controls.Add(btnResetLayout, 0, 6); t.SetColumnSpan(btnResetLayout, 2);
+            t.Controls.Add(btnResetLayout, 0, 7); t.SetColumnSpan(btnResetLayout, 2);
 
             numFont.ValueChanged += (s, e) => { if (!_suppressProps && _selItem != null && !_selItem.IsBarcode) { _selItem.FontSizePt = (double)numFont.Value; UpdatePreview(); } };
             numX.ValueChanged += (s, e) => { if (!_suppressProps && _selItem != null) { _selItem.Xmm = (double)numX.Value; UpdatePreview(); } };
@@ -2067,6 +2074,21 @@ namespace LabelPrinterApp
             if (_labelBitmap == null) return;
             var p = PreviewToLabel(e.Location);
             if (p == null) { SelectItem(null); return; }
+            if (_moveAll)
+            {
+                _dragging = true;
+                _allStartX = p.Value.X / PxPerMm();
+                _allStartY = p.Value.Y / PxPerMm();
+                _allOrigX = new double[_settings.Layout.Count];
+                _allOrigY = new double[_settings.Layout.Count];
+                for (int i = 0; i < _settings.Layout.Count; i++)
+                {
+                    _allOrigX[i] = _settings.Layout[i].Xmm;
+                    _allOrigY[i] = _settings.Layout[i].Ymm;
+                }
+                picPreview.Cursor = Cursors.SizeAll;
+                return;
+            }
             LayoutItem hit = null;
             for (int i = _settings.Layout.Count - 1; i >= 0; i--)
             {
@@ -2093,6 +2115,24 @@ namespace LabelPrinterApp
 
         private void Pic_MouseMove(object sender, MouseEventArgs e)
         {
+            if (_dragging && _moveAll)
+            {
+                var p = PreviewToLabel(e.Location);
+                if (p != null)
+                {
+                    double mmPerPx = 1.0 / PxPerMm();
+                    double dx = p.Value.X * mmPerPx - _allStartX;
+                    double dy = p.Value.Y * mmPerPx - _allStartY;
+                    for (int i = 0; i < _settings.Layout.Count; i++)
+                    {
+                        var it = _settings.Layout[i];
+                        it.Xmm = Math.Max(0, Math.Min(_settings.LabelWidthMm, _allOrigX[i] + dx));
+                        it.Ymm = Math.Max(0, Math.Min(_settings.LabelHeightMm, _allOrigY[i] + dy));
+                    }
+                    UpdatePreview();
+                }
+                return;
+            }
             if (_dragging && _selItem != null)
             {
                 var p = PreviewToLabel(e.Location);
