@@ -836,7 +836,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.8";
+        public const string AppVersion = "1.2.9";
 
         public static int CompareVersion(string a, string b)
         {
@@ -1321,7 +1321,7 @@ namespace LabelPrinterApp
 
             var gHist = BuildHistoryGroup();
             gHist.Dock = DockStyle.Bottom;
-            gHist.Height = 170;
+            gHist.Height = 205;
 
             var main = new TableLayoutPanel
             {
@@ -1648,15 +1648,15 @@ namespace LabelPrinterApp
             t.Controls.Add(grid, 0, 1);
 
             var btnCol = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
-            var btnReprint = new Button { Text = "重印选中", Width = 170, Height = 24, Margin = new Padding(0, 0, 0, 2) };
+            var btnReprint = new Button { Text = "重印选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnReprint.Click += (s, e) => { var rec = SelectedRecord(); if (rec != null) Reprint(rec); };
-            var btnDel = new Button { Text = "删除选中", Width = 170, Height = 24, Margin = new Padding(0, 0, 0, 2) };
+            var btnDel = new Button { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnDel.Click += (s, e) => DeleteSelected();
-            var btnClearAll = new Button { Text = "清空全部", Width = 170, Height = 24, Margin = new Padding(0, 0, 0, 2) };
+            var btnClearAll = new Button { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
-            var btnFolder = new Button { Text = "打开数据文件夹", Width = 170, Height = 24, Margin = new Padding(0, 0, 0, 2) };
+            var btnFolder = new Button { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
-            var btnUpdate = new Button { Text = "检查更新", Width = 170, Height = 24, Margin = Padding.Empty };
+            var btnUpdate = new Button { Text = "检查更新", Width = 170, Height = 22, Margin = Padding.Empty };
             btnUpdate.Click += (s, e) => CheckUpdate(true);
             btnCol.Controls.Add(btnReprint);
             btnCol.Controls.Add(btnDel);
