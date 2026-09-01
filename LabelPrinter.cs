@@ -635,6 +635,7 @@ namespace LabelPrinterApp
         public int LayoutVersion = 6;
         public string UpdateUrl = "";
         public string UpdateToken = "";
+        public int BarcodeWidth = 2;   // 0=细  1=中  2=粗
         public List<LayoutItem> Layout = LayoutItem.DefaultLayout(85, 35);
 
         public string Path;
@@ -667,6 +668,7 @@ namespace LabelPrinterApp
                 bool useSavedLayout = hasLayoutVersion && LayoutVersion >= 6;
                 if (d.ContainsKey("updateUrl")) UpdateUrl = d["updateUrl"];
                 if (d.ContainsKey("updateToken")) UpdateToken = d["updateToken"];
+                if (d.ContainsKey("barcodeWidth")) BarcodeWidth = (int)ParseD(d["barcodeWidth"], BarcodeWidth);
                 LabelWidthMm = Math.Max(5, Math.Min(200, LabelWidthMm));
                 LabelHeightMm = Math.Max(5, Math.Min(300, LabelHeightMm));
 
@@ -711,6 +713,7 @@ namespace LabelPrinterApp
                 sb.AppendLine("layoutVersion=" + LayoutVersion);
                 sb.AppendLine("updateUrl=" + UpdateUrl);
                 sb.AppendLine("updateToken=" + UpdateToken);
+                sb.AppendLine("barcodeWidth=" + BarcodeWidth);
                 foreach (var it in Layout)
                 {
                     sb.AppendLine("layout." + it.Id + ".x=" + it.Xmm.ToString("0.##", CultureInfo.InvariantCulture));
@@ -829,7 +832,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.1";
+        public const string AppVersion = "1.2.2";
 
         public static int CompareVersion(string a, string b)
         {
@@ -961,7 +964,7 @@ namespace LabelPrinterApp
         private TextBox txtNetPrinter;
         private Label lblStatus, lblStep, lblToday;
         private CheckBox chkAuto, chkModel, chkType, chkSN, chkMAC;
-        private ComboBox cmbPrinter, cmbDpi;
+        private ComboBox cmbPrinter, cmbDpi, cmbBarWidth;
         private NumericUpDown numW, numH, numFont, numX, numY, numBarcodeH;
         private CheckBox chkItemVisible;
         private Label lblSel;
@@ -1017,6 +1020,7 @@ namespace LabelPrinterApp
             LoadHistoryGrid();
             ApplySettingsToUi();
             ApplyChecksToLayout();
+            ApplyBarcodeWidthToLayout();
             UpdatePreview();
             UpdateTodayCount();
             _refreshTimer = new Timer { Interval = 4000 };
@@ -1478,11 +1482,12 @@ namespace LabelPrinterApp
         private GroupBox BuildSizeGroup()
         {
             var g = new GroupBox { Text = "标签规格", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
-            var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 2, Padding = new Padding(0), Margin = Padding.Empty };
+            var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -1498,7 +1503,14 @@ namespace LabelPrinterApp
             cmbDpi.Items.AddRange(new object[] { "203 dpi", "300 dpi" });
             t.Controls.Add(cmbDpi, 1, 1); t.SetColumnSpan(cmbDpi, 2);
 
-            numW.ValueChanged += (s, e) => { _settings.LabelWidthMm = (double)numW.Value; numX.Maximum = (decimal)_settings.LabelWidthMm; ApplyChecksToLayout(); UpdatePreview(); };
+            t.Controls.Add(new Label { Text = "条码粗细", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 8, 0) }, 0, 2);
+            cmbBarWidth = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 0) };
+            cmbBarWidth.Items.AddRange(new object[] { "细", "中", "粗" });
+            cmbBarWidth.SelectedIndex = _settings.BarcodeWidth;
+            cmbBarWidth.SelectedIndexChanged += (s, e) => { if (cmbBarWidth.SelectedIndex >= 0) { _settings.BarcodeWidth = cmbBarWidth.SelectedIndex; ApplyBarcodeWidthToLayout(); _settings.Save(); UpdatePreview(); } };
+            t.Controls.Add(cmbBarWidth, 1, 2); t.SetColumnSpan(cmbBarWidth, 2);
+
+            numW.ValueChanged += (s, e) => { _settings.LabelWidthMm = (double)numW.Value; numX.Maximum = (decimal)_settings.LabelWidthMm; ApplyChecksToLayout(); ApplyBarcodeWidthToLayout(); UpdatePreview(); };
             numH.ValueChanged += (s, e) => { _settings.LabelHeightMm = (double)numH.Value; numY.Maximum = (decimal)_settings.LabelHeightMm; UpdatePreview(); };
             cmbDpi.SelectedIndexChanged += (s, e) => { if (cmbDpi.SelectedIndex >= 0) { _settings.Dpi = cmbDpi.SelectedIndex == 0 ? 203 : 300; UpdatePreview(); } };
 
@@ -2008,6 +2020,17 @@ namespace LabelPrinterApp
                     case "mac_text": it.Visible = chkMAC.Checked; break;
                 }
             }
+        }
+
+        private void ApplyBarcodeWidthToLayout()
+        {
+            double W = _settings.LabelWidthMm;
+            double maxw;
+            if (_settings.BarcodeWidth == 0) maxw = Math.Max(20, W * 0.35);
+            else if (_settings.BarcodeWidth == 1) maxw = Math.Max(20, W * 0.6);
+            else maxw = Math.Max(20, W - 6);
+            foreach (var it in _settings.Layout)
+                if (it.IsBarcode) it.MaxWidthMm = maxw;
         }
 
         private Bitmap _labelBitmap;
