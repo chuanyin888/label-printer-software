@@ -416,19 +416,20 @@ namespace LabelPrinterApp
             return PatternFor(BuildCodes(data)).Length + QuietModules * 2;
         }
 
-        public static int Draw(Graphics g, string data, int centerX, int topY, int maxWidth, int height, out int moduleW)
+        public static int Draw(Graphics g, string data, int centerX, int topY, int frameWidth, int height, out int moduleW)
         {
             var codes = BuildCodes(data);
             string pattern = PatternFor(codes);
             int modules = pattern.Length + QuietModules * 2;
-            moduleW = Math.Max(1, Math.Min(3, maxWidth / modules));
-            int totalW = modules * moduleW;
-            int x0 = centerX - totalW / 2;
-            int start = x0 + QuietModules * moduleW;
+            moduleW = Math.Max(1, Math.Min(3, Math.Max(1, frameWidth) / modules));
+            int barWidth = modules * moduleW;
+            int frameW = Math.Max(frameWidth, barWidth);
+            int x0 = centerX - frameW / 2;
+            int start = x0 + (frameW - barWidth) / 2 + QuietModules * moduleW;
             for (int m = 0; m < pattern.Length; m++)
                 if (pattern[m] == '1')
                     g.FillRectangle(Brushes.Black, start + m * moduleW, topY, moduleW, height);
-            return totalW;
+            return frameW;
         }
 
         public static string Decode(List<int> codes)
@@ -600,8 +601,9 @@ namespace LabelPrinterApp
                 if (it.MaxWidthMm > 0)
                     maxW = Math.Min(maxW, MmToPx(it.MaxWidthMm, dpi));
                 int modules = Code128.ModuleCount(data);
-                int mw = Math.Max(1, Math.Min(3, maxW / modules));
-                int w = modules * mw;
+                int mw = Math.Max(1, Math.Min(3, Math.Max(1, maxW) / modules));
+                int barW = modules * mw;
+                int w = Math.Max(maxW, barW);
                 int h = Math.Max(20, MmToPx(it.HeightMm, dpi));
                 return new RectangleF(MmToPx(it.Xmm, dpi) - w / 2f, MmToPx(it.Ymm, dpi), w, h);
             }
@@ -633,7 +635,7 @@ namespace LabelPrinterApp
         public bool ShowSN = true;
         public bool ShowMAC = true;
         public int LayoutVersion = 6;
-        public string UpdateUrl = "";
+        public string UpdateUrl = "https://github.com/chuanyin888/label-printer-software";
         public string UpdateToken = "";
         public int BarcodeWidth = 2;   // 0=细  1=中  2=粗
         public List<LayoutItem> Layout = LayoutItem.DefaultLayout(85, 35);
@@ -832,7 +834,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.2";
+        public const string AppVersion = "1.2.3";
 
         public static int CompareVersion(string a, string b)
         {
@@ -2028,7 +2030,7 @@ namespace LabelPrinterApp
             double maxw;
             if (_settings.BarcodeWidth == 0) maxw = Math.Max(20, W * 0.35);
             else if (_settings.BarcodeWidth == 1) maxw = Math.Max(20, W * 0.6);
-            else maxw = Math.Max(20, W - 6);
+            else maxw = Math.Max(20, W - 10);
             foreach (var it in _settings.Layout)
                 if (it.IsBarcode) it.MaxWidthMm = maxw;
         }
