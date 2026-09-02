@@ -99,6 +99,162 @@ namespace LabelPrinterApp
         }
     }
 
+    // -------------------------------------------------------------------------------------------
+    // 设计层：套用 design-taste-frontend 可迁移方法论（统一配色 / 圆角 / 字体，单一生机色强调，
+    // 消除“AI 默认味”，保证按钮对比度）。仅作用于窗口 UI，不影响标签打印内容。
+    // -------------------------------------------------------------------------------------------
+    internal static class Ui
+    {
+        // 中性底（Slate 系）
+        public static Color Back      = Color.FromArgb(241, 243, 245); // 窗口底
+        public static Color Card      = Color.FromArgb(255, 255, 255); // 卡片底
+        public static Color Border    = Color.FromArgb(214, 221, 227); // 边框
+        public static Color Text      = Color.FromArgb(31, 42, 55);    // 主文字
+        public static Color TextMuted = Color.FromArgb(95, 107, 122);  // 次要文字
+        public static Color TextFaint = Color.FromArgb(148, 163, 179); // 最浅文字
+        public static Color RowAlt    = Color.FromArgb(248, 250, 251); // 表格隔行
+        public static Color GridHdr   = Color.FromArgb(229, 244, 241); // 表头(浅青)
+        public static Color AccentSoft= Color.FromArgb(231, 244, 241); // 选中(浅青)
+
+        // 单项强调色（Teal，全界面唯一强调，不做紫/蓝渐变）
+        public static Color Accent      = Color.FromArgb(15, 118, 110);  // teal-700
+        public static Color AccentHover = Color.FromArgb(13, 148, 136);  // teal-600
+        public static Color AccentDown  = Color.FromArgb(17, 94, 89);    // teal-800
+
+        // 语义状态色（仅用于状态提示，不参与强调）
+        public static Color Success    = Color.FromArgb(21, 128, 61);
+        public static Color Warning    = Color.FromArgb(180, 83, 9);
+        public static Color Danger     = Color.FromArgb(185, 28, 28);
+        public static Color DangerHover= Color.FromArgb(254, 242, 242);
+
+        // 中性按钮
+        public static Color SecondaryHover = Color.FromArgb(248, 250, 251);
+        public static Color SecondaryDown  = Color.FromArgb(238, 242, 244);
+
+        // 字体
+        public static Font BaseFont      = new Font("Microsoft YaHei UI", 9F);
+        public static Font HeadingFont   = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+        public static Font StatusFont    = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold);
+        public static Font GroupTitleFont= new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
+
+        // 把旧代码里的任意颜色映射到统一配色
+        public static Color Resolve(Color c)
+        {
+            if (c == Color.Gray || c == Color.DimGray) return TextMuted;
+            if (c == Color.DodgerBlue) return Accent;
+            if (c == Color.SeaGreen) return Success;
+            if (c == Color.DarkOrange) return Warning;
+            if (c == Color.Red) return Danger;
+            if (c == Color.Black || c == SystemColors.ControlText || c == SystemColors.Control) return Text;
+            return c;
+        }
+    }
+
+    internal enum ButtonKind { Primary, Secondary, Danger }
+
+    // 统一圆角的平面按钮，带 hover/按下反馈，保证文字对比度
+    internal class RoundedButton : Button
+    {
+        public ButtonKind Kind = ButtonKind.Secondary;
+        private bool _hover, _pressed;
+
+        public RoundedButton()
+        {
+            FlatStyle = FlatStyle.Flat;
+            FlatAppearance.BorderSize = 0;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            MouseEnter += (s, e) => { _hover = true; Invalidate(); };
+            MouseLeave += (s, e) => { _hover = false; _pressed = false; Invalidate(); };
+            MouseDown  += (s, e) => { _pressed = true; Invalidate(); };
+            MouseUp    += (s, e) => { _pressed = false; Invalidate(); };
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            var path = RoundRect(rect, 6);
+
+            Brush bg = null; Pen border = null; Color textColor;
+            if (Kind == ButtonKind.Primary)
+            {
+                bg = new SolidBrush(_pressed ? Ui.AccentDown : (_hover ? Ui.AccentHover : Ui.Accent));
+                textColor = Color.White;
+            }
+            else if (Kind == ButtonKind.Danger)
+            {
+                bg = new SolidBrush(_pressed ? Ui.DangerHover : (_hover ? Ui.DangerHover : Color.White));
+                border = new Pen(Ui.Danger, 1f);
+                textColor = Ui.Danger;
+            }
+            else
+            {
+                bg = new SolidBrush(_pressed ? Ui.SecondaryDown : (_hover ? Ui.SecondaryHover : Color.White));
+                border = new Pen(Ui.Border, 1f);
+                textColor = Ui.Text;
+            }
+
+            if (!Enabled) { bg = new SolidBrush(Color.FromArgb(232, 236, 239)); textColor = Ui.TextFaint; }
+            using (bg)
+            {
+                g.FillPath(bg, path);
+                if (border != null) using (border) g.DrawPath(border, path);
+            }
+            TextRenderer.DrawText(g, Text, Font, rect, textColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+
+        private static GraphicsPath RoundRect(Rectangle r, int radius)
+        {
+            var p = new GraphicsPath();
+            int d = radius * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+    }
+
+    // 现代“卡片式”分组框：白底圆角边框，标题用强调色加粗
+    internal class CardGroup : GroupBox
+    {
+        public CardGroup()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor = Ui.Card;
+            ForeColor = Ui.Text;
+            Padding = new Padding(8);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            var path = RoundRect(rect, 8);
+            using (var b = new SolidBrush(Ui.Card)) g.FillPath(b, path);
+            using (var p = new Pen(Ui.Border, 1f)) g.DrawPath(p, path);
+            var tr = new Rectangle(12, 6, Math.Max(0, Width - 30), 16);
+            TextRenderer.DrawText(g, Text, Ui.GroupTitleFont, tr, Ui.Accent,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        private static GraphicsPath RoundRect(Rectangle r, int radius)
+        {
+            var p = new GraphicsPath();
+            int d = radius * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+    }
+
     internal static class SelfTest
     {
         public static void Run()
@@ -635,7 +791,7 @@ namespace LabelPrinterApp
         public bool ShowSN = true;
         public bool ShowMAC = true;
         public int LayoutVersion = 6;
-        public const string DefaultUpdateUrl = "https://github.com/chuanyin888/label-printer-software";
+        public const string DefaultUpdateUrl = "https://gitee.com/chuanyin888/label-printer-software/raw/master/latest.json";
         public string UpdateUrl = DefaultUpdateUrl;
         public string UpdateToken = "";
         public int BarcodeWidth = 2;   // 0=细  1=中  2=粗
@@ -836,7 +992,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.2.10";
+        public const string AppVersion = "1.3.0";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1014,9 +1170,9 @@ namespace LabelPrinterApp
             Text = "设备标签打印软件";
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(1000, 680);
-            MinimumSize = new Size(900, 660);
-            Font = new Font("Microsoft YaHei", 9F);
+            ClientSize = new Size(1000, 764);
+            MinimumSize = new Size(900, 690);
+            Font = Ui.BaseFont;
             StartPosition = FormStartPosition.CenterScreen;
 
             _dataDir = GetDataDir();
@@ -1035,6 +1191,7 @@ namespace LabelPrinterApp
             _records.AddRange(_history.Load());
 
             BuildUi2();
+            ApplyUi();
             RefreshPrinters(true);
             LoadHistoryGrid();
             ApplySettingsToUi();
@@ -1047,6 +1204,116 @@ namespace LabelPrinterApp
             Shown += (s, e) => { txtScan.Focus(); };
             Shown += (s, e) => StartAutoCheck();
             FormClosing += (s, e) => SaveAll();
+        }
+
+        // 套用统一主题：窗口底色 + 递归统一各控件配色 / 字体 / 圆角
+        private void ApplyUi()
+        {
+            BackColor = Ui.Back;
+            StyleTree(this, true);
+        }
+
+        private void StyleTree(Control c, bool isRoot)
+        {
+            if (c is RoundedButton)
+            {
+                RoundedButton rb = (RoundedButton)c;
+                rb.Kind = ButtonKindFor(rb.Text);
+                if (rb.Text == "打印当前设备") rb.Font = Ui.HeadingFont;
+                rb.Invalidate();
+            }
+            else if (c is Button)
+            {
+                Button b = (Button)c;
+                b.FlatStyle = FlatStyle.Flat;
+                b.FlatAppearance.BorderSize = 0;
+                b.BackColor = Ui.Accent;
+                b.ForeColor = Color.White;
+            }
+            else if (c is GroupBox)
+            {
+                GroupBox gb = (GroupBox)c;
+                gb.BackColor = Ui.Card;
+                gb.ForeColor = Ui.Text;
+            }
+            else if (c is DataGridView)
+            {
+                StyleGrid((DataGridView)c);
+            }
+            else if (c is TextBox)
+            {
+                TextBox tbx = (TextBox)c;
+                tbx.BackColor = Color.White;
+                tbx.ForeColor = Ui.Text;
+                tbx.BorderStyle = BorderStyle.FixedSingle;
+            }
+            else if (c is ComboBox)
+            {
+                ComboBox cb = (ComboBox)c;
+                cb.BackColor = Color.White; cb.ForeColor = Ui.Text;
+            }
+            else if (c is NumericUpDown)
+            {
+                NumericUpDown nud = (NumericUpDown)c;
+                nud.ForeColor = Ui.Text;
+            }
+            else if (c is CheckBox)
+            {
+                CheckBox chk = (CheckBox)c;
+                chk.ForeColor = Ui.Text; chk.BackColor = Color.Transparent;
+            }
+            else if (c is Label)
+            {
+                Label lb = (Label)c;
+                lb.ForeColor = Ui.Resolve(lb.ForeColor);
+                lb.BackColor = Color.Transparent;
+            }
+            else if (c is TableLayoutPanel || c is FlowLayoutPanel || c is Panel)
+            {
+                c.BackColor = Color.Transparent;
+            }
+            else if (c is PictureBox) { /* 保留白色标签预览底 */ }
+
+            foreach (Control ch in c.Controls) StyleTree(ch, false);
+        }
+
+        private static ButtonKind ButtonKindFor(string text)
+        {
+            text = (text ?? "").Trim();
+            if (text == "打印当前设备" || text == "连接" || text == "恢复默认排版") return ButtonKind.Primary;
+            if (text == "删除选中" || text == "清空全部") return ButtonKind.Danger;
+            return ButtonKind.Secondary;
+        }
+
+        private static void StyleGrid(DataGridView g)
+        {
+            g.BackgroundColor = Color.White;
+            g.BorderStyle = BorderStyle.None;
+            g.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            g.GridColor = Ui.Border;
+            g.RowHeadersVisible = false;
+            g.EnableHeadersVisualStyles = false;
+            g.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            g.ColumnHeadersHeight = 32;
+            var h = g.ColumnHeadersDefaultCellStyle;
+            h.BackColor = Ui.GridHdr;
+            h.ForeColor = Ui.Accent;
+            h.SelectionBackColor = Ui.GridHdr;
+            h.SelectionForeColor = Ui.Accent;
+            h.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+            h.Alignment = DataGridViewContentAlignment.MiddleLeft;
+            h.Padding = new Padding(4, 0, 4, 0);
+            var d = g.DefaultCellStyle;
+            d.BackColor = Color.White;
+            d.ForeColor = Ui.Text;
+            d.SelectionBackColor = Ui.AccentSoft;
+            d.SelectionForeColor = Ui.Text;
+            d.Padding = new Padding(4, 2, 4, 2);
+            g.AlternatingRowsDefaultCellStyle.BackColor = Ui.RowAlt;
+            g.AlternatingRowsDefaultCellStyle.SelectionBackColor = Ui.AccentSoft;
+            g.AlternatingRowsDefaultCellStyle.SelectionForeColor = Ui.Text;
+            g.RowTemplate.Height = 28;
         }
 
         private void CheckUpdate(bool interactive)
@@ -1150,7 +1417,7 @@ namespace LabelPrinterApp
         private void BuildUiOld()
         {
             // ---------- Left: scan input ----------
-            var gLeft = new GroupBox { Text = "扫码录入", Location = new Point(8, 8), Size = new Size(250, 478) };
+            var gLeft = new CardGroup { Text = "扫码录入", Location = new Point(8, 8), Size = new Size(250, 478) };
             Controls.Add(gLeft);
 
             lblStatus = new Label { Location = new Point(10, 22), Size = new Size(230, 40), Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold), Text = "请扫描设备二维码…", ForeColor = Color.DodgerBlue };
@@ -1177,22 +1444,22 @@ namespace LabelPrinterApp
             chkAuto.CheckedChanged += (s, e) => _settings.AutoPrint = chkAuto.Checked;
             gLeft.Controls.Add(chkAuto);
 
-            var btnPrint = new Button { Text = "打印当前设备", Location = new Point(10, 384), Size = new Size(230, 34), Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold) };
+            var btnPrint = new RoundedButton { Text = "打印当前设备", Location = new Point(10, 384), Size = new Size(230, 34), Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold) };
             btnPrint.Click += (s, e) => SaveAndPrint(false);
             gLeft.Controls.Add(btnPrint);
 
-            var btnSave = new Button { Text = "仅保存", Location = new Point(10, 424), Size = new Size(110, 28) };
+            var btnSave = new RoundedButton { Text = "仅保存", Location = new Point(10, 424), Size = new Size(110, 28) };
             btnSave.Click += (s, e) => SaveCurrent(false);
             gLeft.Controls.Add(btnSave);
 
-            var btnClear = new Button { Text = "清空输入", Location = new Point(128, 424), Size = new Size(112, 28) };
+            var btnClear = new RoundedButton { Text = "清空输入", Location = new Point(128, 424), Size = new Size(112, 28) };
             btnClear.Click += (s, e) => { ClearInputs(); };
             gLeft.Controls.Add(btnClear);
 
             gLeft.Controls.Add(new Label { Text = "提示：历史记录自动保存，随时可重印。", Location = new Point(10, 456), Size = new Size(230, 16), ForeColor = Color.Gray });
 
             // ---------- Middle: preview ----------
-            var gPrev = new GroupBox { Text = "标签预览（鼠标拖动文字/条码可调整位置）", Location = new Point(266, 8), Size = new Size(458, 514), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+            var gPrev = new CardGroup { Text = "标签预览（鼠标拖动文字/条码可调整位置）", Location = new Point(266, 8), Size = new Size(458, 514), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
             Controls.Add(gPrev);
             picPreview = new PictureBox { Location = new Point(10, 22), Size = new Size(438, 460), BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle, SizeMode = PictureBoxSizeMode.Zoom };
             picPreview.MouseDown += Pic_MouseDown;
@@ -1207,25 +1474,25 @@ namespace LabelPrinterApp
             gPrev.Controls.Add(lblSize);
 
             // ---------- Right: settings ----------
-            var gPrinter = new GroupBox { Text = "打印机（可添加网络/局域网打印机）", Location = new Point(732, 8), Size = new Size(260, 136), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var gPrinter = new CardGroup { Text = "打印机（可添加网络/局域网打印机）", Location = new Point(732, 8), Size = new Size(260, 136), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             Controls.Add(gPrinter);
             gPrinter.Controls.Add(new Label { Text = "选择打印机：", Location = new Point(8, 18) });
             cmbPrinter = new ComboBox { Location = new Point(8, 38), Size = new Size(232, 26), DropDownStyle = ComboBoxStyle.DropDownList };
             cmbPrinter.SelectedIndexChanged += (s, e) => { if (cmbPrinter.SelectedItem != null) _settings.Printer = cmbPrinter.SelectedItem.ToString(); };
             gPrinter.Controls.Add(cmbPrinter);
-            var btnRefresh = new Button { Text = "刷新", Location = new Point(8, 72), Size = new Size(66, 26) };
+            var btnRefresh = new RoundedButton { Text = "刷新", Location = new Point(8, 72), Size = new Size(66, 26) };
             btnRefresh.Click += (s, e) => RefreshPrinters(false);
             gPrinter.Controls.Add(btnRefresh);
-            var btnAddNet = new Button { Text = "添加网络打印机…", Location = new Point(80, 72), Size = new Size(170, 26) };
+            var btnAddNet = new RoundedButton { Text = "添加网络打印机…", Location = new Point(80, 72), Size = new Size(170, 26) };
             btnAddNet.Click += (s, e) => AddNetworkPrinter();
             gPrinter.Controls.Add(btnAddNet);
             txtNetPrinter = new TextBox { Location = new Point(8, 106), Size = new Size(140, 24) };
             gPrinter.Controls.Add(txtNetPrinter);
-            var btnConnect = new Button { Text = "连接", Location = new Point(154, 104), Size = new Size(96, 28) };
+            var btnConnect = new RoundedButton { Text = "连接", Location = new Point(154, 104), Size = new Size(96, 28) };
             btnConnect.Click += (s, e) => ConnectNetworkPrinter();
             gPrinter.Controls.Add(btnConnect);
 
-            var gSize = new GroupBox { Text = "标签规格（宽/高，单位 mm）", Location = new Point(732, 146), Size = new Size(260, 72), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var gSize = new CardGroup { Text = "标签规格（宽/高，单位 mm）", Location = new Point(732, 146), Size = new Size(260, 72), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             Controls.Add(gSize);
             gSize.Controls.Add(new Label { Text = "宽", Location = new Point(8, 20) });
             numW = new NumericUpDown { Location = new Point(40, 16), Size = new Size(64, 24), Minimum = 5, Maximum = 200, DecimalPlaces = 1, Increment = 0.5m };
@@ -1241,7 +1508,7 @@ namespace LabelPrinterApp
             numH.ValueChanged += (s, e) => { _settings.LabelHeightMm = (double)numH.Value; numY.Maximum = (decimal)_settings.LabelHeightMm; UpdatePreview(); };
             cmbDpi.SelectedIndexChanged += (s, e) => { if (cmbDpi.SelectedIndex >= 0) { _settings.Dpi = cmbDpi.SelectedIndex == 0 ? 203 : 300; UpdatePreview(); } };
 
-            var gContent = new GroupBox { Text = "打印内容（可多选）", Location = new Point(732, 224), Size = new Size(260, 98), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var gContent = new CardGroup { Text = "打印内容（可多选）", Location = new Point(732, 224), Size = new Size(260, 98), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             Controls.Add(gContent);
             chkModel = new CheckBox { Text = "型号", Location = new Point(10, 20), Size = new Size(120, 22), Checked = _settings.ShowModel };
             chkType = new CheckBox { Text = "类型", Location = new Point(138, 20), Size = new Size(114, 22), Checked = _settings.ShowType };
@@ -1253,7 +1520,7 @@ namespace LabelPrinterApp
                 gContent.Controls.Add(c);
             }
 
-            var gProp = new GroupBox { Text = "排版属性（选中预览中的元素后编辑）", Location = new Point(732, 328), Size = new Size(260, 198), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var gProp = new CardGroup { Text = "排版属性（选中预览中的元素后编辑）", Location = new Point(732, 328), Size = new Size(260, 198), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             Controls.Add(gProp);
             lblSel = new Label { Location = new Point(8, 10), Size = new Size(234, 20), Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), Text = "未选择元素" };
             gProp.Controls.Add(lblSel);
@@ -1276,12 +1543,12 @@ namespace LabelPrinterApp
             chkItemVisible = new CheckBox { Text = "在标签上显示此元素", Location = new Point(8, 140), Size = new Size(200, 22) };
             chkItemVisible.CheckedChanged += (s, e) => { if (!_suppressProps && _selItem != null) { _selItem.Visible = chkItemVisible.Checked; ApplyChecksToLayout(); UpdatePreview(); } };
             gProp.Controls.Add(chkItemVisible);
-            btnResetLayout = new Button { Text = "恢复默认排版", Location = new Point(8, 166), Size = new Size(150, 26) };
+            btnResetLayout = new RoundedButton { Text = "恢复默认排版", Location = new Point(8, 166), Size = new Size(150, 26) };
             btnResetLayout.Click += (s, e) => { _settings.Layout = LayoutItem.DefaultLayout(_settings.LabelWidthMm, _settings.LabelHeightMm); ApplyChecksToLayout(); UpdatePreview(); SetStatus("已恢复默认排版", Color.Gray); };
             gProp.Controls.Add(btnResetLayout);
 
             // ---------- Bottom: history ----------
-            var gHist = new GroupBox { Text = "历史记录（自动保存，双击可重印）", Location = new Point(8, 530), Size = new Size(984, 140), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom };
+            var gHist = new CardGroup { Text = "历史记录（自动保存，双击可重印）", Location = new Point(8, 530), Size = new Size(984, 140), Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom };
             Controls.Add(gHist);
 
             grid = new DataGridView { Location = new Point(12, 22), Size = new Size(780, 92), ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom };
@@ -1296,16 +1563,16 @@ namespace LabelPrinterApp
             grid.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) { var tag = grid.Rows[e.RowIndex].Tag as DeviceRecord; if (tag != null) Reprint(tag); } };
             gHist.Controls.Add(grid);
 
-            var btnReprint = new Button { Text = "重印选中", Location = new Point(802, 22), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var btnReprint = new RoundedButton { Text = "重印选中", Location = new Point(802, 22), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnReprint.Click += (s, e) => { var rec = SelectedRecord(); if (rec != null) Reprint(rec); };
             gHist.Controls.Add(btnReprint);
-            var btnDel = new Button { Text = "删除选中", Location = new Point(802, 50), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var btnDel = new RoundedButton { Text = "删除选中", Location = new Point(802, 50), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnDel.Click += (s, e) => DeleteSelected();
             gHist.Controls.Add(btnDel);
-            var btnClearAll = new Button { Text = "清空全部", Location = new Point(802, 78), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var btnClearAll = new RoundedButton { Text = "清空全部", Location = new Point(802, 78), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
             gHist.Controls.Add(btnClearAll);
-            var btnFolder = new Button { Text = "打开数据文件夹", Location = new Point(802, 106), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            var btnFolder = new RoundedButton { Text = "打开数据文件夹", Location = new Point(802, 106), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
             gHist.Controls.Add(btnFolder);
 
@@ -1329,7 +1596,7 @@ namespace LabelPrinterApp
 
             var gHist = BuildHistoryGroup();
             gHist.Dock = DockStyle.Bottom;
-            gHist.Height = 205;
+            gHist.Height = 214;
 
             var main = new TableLayoutPanel
             {
@@ -1344,9 +1611,13 @@ namespace LabelPrinterApp
             main.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 296));
             main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
+            var leftScroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0, 0, 8, 0), Padding = Padding.Empty };
             var gLeft = BuildScanGroup();
-            gLeft.Dock = DockStyle.Fill;
-            gLeft.Margin = new Padding(0, 0, 8, 0);
+            gLeft.Dock = DockStyle.Top;
+            gLeft.AutoSize = true;
+            gLeft.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            gLeft.Margin = Padding.Empty;
+            leftScroll.Controls.Add(gLeft);
 
             var gPrev = BuildPreviewGroup();
             gPrev.Dock = DockStyle.Fill;
@@ -1364,9 +1635,9 @@ namespace LabelPrinterApp
                 Margin = Padding.Empty
             };
             for (int i = 0; i < 4; i++) rightCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            var gp = BuildPrinterGroup(); gp.Dock = DockStyle.Top; gp.Margin = new Padding(0, 0, 0, 10);
-            var gs = BuildSizeGroup(); gs.Dock = DockStyle.Top; gs.Margin = new Padding(0, 0, 0, 10);
-            var gc = BuildContentGroup(); gc.Dock = DockStyle.Top; gc.Margin = new Padding(0, 0, 0, 10);
+            var gp = BuildPrinterGroup(); gp.Dock = DockStyle.Top; gp.Margin = new Padding(0, 0, 0, 6);
+            var gs = BuildSizeGroup(); gs.Dock = DockStyle.Top; gs.Margin = new Padding(0, 0, 0, 6);
+            var gc = BuildContentGroup(); gc.Dock = DockStyle.Top; gc.Margin = new Padding(0, 0, 0, 6);
             var gprop = BuildPropGroup(); gprop.Dock = DockStyle.Top; gprop.Margin = new Padding(0, 0, 0, 4);
             rightCol.Controls.Add(gp, 0, 0);
             rightCol.Controls.Add(gs, 0, 1);
@@ -1374,7 +1645,7 @@ namespace LabelPrinterApp
             rightCol.Controls.Add(gprop, 0, 3);
             rightScroll.Controls.Add(rightCol);
 
-            main.Controls.Add(gLeft, 0, 0);
+            main.Controls.Add(leftScroll, 0, 0);
             main.Controls.Add(gPrev, 1, 0);
             main.Controls.Add(rightScroll, 2, 0);
 
@@ -1385,7 +1656,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildScanGroup()
         {
-            var g = new GroupBox { Text = "扫码录入", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "扫码录入", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 14, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1422,22 +1693,22 @@ namespace LabelPrinterApp
             foreach (var tb in new[] { txtModel, txtType, txtSN, txtMAC })
                 tb.TextChanged += (s, e) => UpdatePreview();
 
-            chkAuto = new CheckBox { Text = "扫描完成后自动打印并保存", AutoSize = true, Checked = _settings.AutoPrint, Margin = new Padding(0, 2, 0, 8) };
+            chkAuto = new CheckBox { Text = "扫描完成后自动打印并保存", AutoSize = true, Checked = _settings.AutoPrint, Margin = new Padding(0, 2, 0, 6) };
             chkAuto.CheckedChanged += (s, e) => _settings.AutoPrint = chkAuto.Checked;
             t.Controls.Add(chkAuto, 0, 10); t.SetColumnSpan(chkAuto, 2);
 
-            var btnPrint = new Button { Text = "打印当前设备", Dock = DockStyle.Fill, Height = 36, Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8) };
+            var btnPrint = new RoundedButton { Text = "打印当前设备", Dock = DockStyle.Fill, Height = 34, Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold), Margin = new Padding(0, 0, 0, 6) };
             btnPrint.Click += (s, e) => SaveAndPrint(false);
             t.Controls.Add(btnPrint, 0, 11); t.SetColumnSpan(btnPrint, 2);
 
-            var btnSave = new Button { Text = "仅保存", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 6, 0) };
+            var btnSave = new RoundedButton { Text = "仅保存", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 6, 0) };
             btnSave.Click += (s, e) => SaveCurrent(false);
             t.Controls.Add(btnSave, 0, 12);
-            var btnClear = new Button { Text = "清空输入", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 0) };
+            var btnClear = new RoundedButton { Text = "清空输入", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 0) };
             btnClear.Click += (s, e) => ClearInputs();
             t.Controls.Add(btnClear, 1, 12);
 
-            var lblHintBottom = new Label { Text = "提示：历史记录自动保存，随时可重印。", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 6, 0, 0) };
+            var lblHintBottom = new Label { Text = "提示：历史记录自动保存，随时可重印。", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 4, 0, 0) };
             t.Controls.Add(lblHintBottom, 0, 13); t.SetColumnSpan(lblHintBottom, 2);
 
             g.Controls.Add(t);
@@ -1447,14 +1718,14 @@ namespace LabelPrinterApp
 
         private void AddFieldRow(TableLayoutPanel t, string label, int row, out TextBox box)
         {
-            t.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 6) }, 0, row);
-            box = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 8) };
+            t.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 8, 5) }, 0, row);
+            box = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(box, 1, row);
         }
 
         private GroupBox BuildPreviewGroup()
         {
-            var g = new GroupBox { Text = "标签预览（鼠标拖动文字/条码可调整位置）", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "标签预览（鼠标拖动文字/条码可调整位置）", Dock = DockStyle.Fill, Padding = new Padding(8, 20, 8, 8), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(0), Margin = Padding.Empty };
             t.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -1472,7 +1743,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildPrinterGroup()
         {
-            var g = new GroupBox { Text = "打印机（可添加网络/局域网打印机）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "打印机（可添加网络/局域网打印机）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 4, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
@@ -1485,16 +1756,16 @@ namespace LabelPrinterApp
             cmbPrinter.SelectedIndexChanged += (s, e) => { if (cmbPrinter.SelectedItem != null) _settings.Printer = cmbPrinter.SelectedItem.ToString(); };
             t.Controls.Add(cmbPrinter, 0, 1); t.SetColumnSpan(cmbPrinter, 2);
 
-            var btnAddNet = new Button { Text = "添加网络打印机…", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
+            var btnAddNet = new RoundedButton { Text = "添加网络打印机…", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
             btnAddNet.Click += (s, e) => AddNetworkPrinter();
             t.Controls.Add(btnAddNet, 0, 2); t.SetColumnSpan(btnAddNet, 2);
 
             txtNetPrinter = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 0) };
             t.Controls.Add(txtNetPrinter, 0, 3);
             var btnCol = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
-            var btnRefresh = new Button { Text = "刷新", Width = 78, Height = 28, Margin = new Padding(0, 0, 0, 4) };
+            var btnRefresh = new RoundedButton { Text = "刷新", Width = 78, Height = 28, Margin = new Padding(0, 0, 0, 4) };
             btnRefresh.Click += (s, e) => RefreshPrinters(false);
-            var btnConnect = new Button { Text = "连接", Width = 78, Height = 28, Margin = Padding.Empty };
+            var btnConnect = new RoundedButton { Text = "连接", Width = 78, Height = 28, Margin = Padding.Empty };
             btnConnect.Click += (s, e) => ConnectNetworkPrinter();
             btnCol.Controls.Add(btnRefresh);
             btnCol.Controls.Add(btnConnect);
@@ -1506,7 +1777,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildSizeGroup()
         {
-            var g = new GroupBox { Text = "标签规格", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "标签规格", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
@@ -1545,7 +1816,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildContentGroup()
         {
-            var g = new GroupBox { Text = "打印内容（可多选）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "打印内容（可多选）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -1568,39 +1839,39 @@ namespace LabelPrinterApp
 
         private GroupBox BuildPropGroup()
         {
-            var g = new GroupBox { Text = "排版属性（选中预览中的元素后编辑）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "排版属性（选中预览中的元素后编辑）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(8, 20, 8, 8), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 8, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
             for (int i = 0; i < 8; i++) t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            lblSel = new Label { Text = "未选择元素", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8) };
+            lblSel = new Label { Text = "未选择元素", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), Margin = new Padding(0, 0, 0, 6) };
             t.Controls.Add(lblSel, 0, 0); t.SetColumnSpan(lblSel, 2);
 
-            t.Controls.Add(new Label { Text = "字体大小(pt)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 8) }, 0, 1);
-            numFont = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 4, Maximum = 40, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 4, 0, 8) };
+            t.Controls.Add(new Label { Text = "字体大小(pt)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 8, 6) }, 0, 1);
+            numFont = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 4, Maximum = 40, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(numFont, 1, 1);
 
-            t.Controls.Add(new Label { Text = "水平位置(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 8) }, 0, 2);
-            numX = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 200, DecimalPlaces = 1, Increment = 0.1m, Margin = new Padding(0, 4, 0, 8) };
+            t.Controls.Add(new Label { Text = "水平位置(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 8, 6) }, 0, 2);
+            numX = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 200, DecimalPlaces = 1, Increment = 0.1m, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(numX, 1, 2);
 
-            t.Controls.Add(new Label { Text = "垂直位置(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 8) }, 0, 3);
-            numY = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 300, DecimalPlaces = 1, Increment = 0.1m, Margin = new Padding(0, 4, 0, 8) };
+            t.Controls.Add(new Label { Text = "垂直位置(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 8, 6) }, 0, 3);
+            numY = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 300, DecimalPlaces = 1, Increment = 0.1m, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(numY, 1, 3);
 
-            t.Controls.Add(new Label { Text = "条码高度(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 8) }, 0, 4);
-            numBarcodeH = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 5, Maximum = 60, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 4, 0, 8) };
+            t.Controls.Add(new Label { Text = "条码高度(mm)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 8, 6) }, 0, 4);
+            numBarcodeH = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 5, Maximum = 60, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(numBarcodeH, 1, 4);
 
-            chkItemVisible = new CheckBox { Text = "在标签上显示此元素", AutoSize = true, Margin = new Padding(0, 4, 0, 8) };
+            chkItemVisible = new CheckBox { Text = "在标签上显示此元素", AutoSize = true, Margin = new Padding(0, 3, 0, 6) };
             t.Controls.Add(chkItemVisible, 0, 5); t.SetColumnSpan(chkItemVisible, 2);
 
-            var chkMoveAll = new CheckBox { Text = "整体移动（一起移动所有元素）", AutoSize = true, Margin = new Padding(0, 2, 0, 6) };
+            var chkMoveAll = new CheckBox { Text = "整体移动（一起移动所有元素）", AutoSize = true, Margin = new Padding(0, 2, 0, 4) };
             chkMoveAll.CheckedChanged += (s, e) => { _moveAll = chkMoveAll.Checked; if (!_moveAll) _dragging = false; };
             t.Controls.Add(chkMoveAll, 0, 6); t.SetColumnSpan(chkMoveAll, 2);
 
-            btnResetLayout = new Button { Text = "恢复默认排版", Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 2) };
+            btnResetLayout = new RoundedButton { Text = "恢复默认排版", Dock = DockStyle.Fill, Margin = new Padding(0, 3, 0, 2) };
             btnResetLayout.Click += (s, e) => { _settings.Layout = LayoutItem.DefaultLayout(_settings.LabelWidthMm, _settings.LabelHeightMm); ApplyChecksToLayout(); UpdatePreview(); SetStatus("已恢复默认排版", Color.Gray); };
             t.Controls.Add(btnResetLayout, 0, 7); t.SetColumnSpan(btnResetLayout, 2);
 
@@ -1616,7 +1887,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildHistoryGroup()
         {
-            var g = new GroupBox { Text = "历史记录（自动保存，双击可重印）", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "历史记录（自动保存，双击可重印）", Dock = DockStyle.Fill, Padding = new Padding(8, 20, 8, 8), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 176));
@@ -1656,15 +1927,15 @@ namespace LabelPrinterApp
             t.Controls.Add(grid, 0, 1);
 
             var btnCol = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
-            var btnReprint = new Button { Text = "重印选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
+            var btnReprint = new RoundedButton { Text = "重印选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnReprint.Click += (s, e) => { var rec = SelectedRecord(); if (rec != null) Reprint(rec); };
-            var btnDel = new Button { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
+            var btnDel = new RoundedButton { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnDel.Click += (s, e) => DeleteSelected();
-            var btnClearAll = new Button { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
+            var btnClearAll = new RoundedButton { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
-            var btnFolder = new Button { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
+            var btnFolder = new RoundedButton { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
-            var btnUpdate = new Button { Text = "检查更新", Width = 170, Height = 22, Margin = Padding.Empty };
+            var btnUpdate = new RoundedButton { Text = "检查更新", Width = 170, Height = 22, Margin = Padding.Empty };
             btnUpdate.Click += (s, e) => CheckUpdate(true);
             btnCol.Controls.Add(btnReprint);
             btnCol.Controls.Add(btnDel);
@@ -1997,7 +2268,7 @@ namespace LabelPrinterApp
         {
             if (lblStatus == null) return;
             lblStatus.Text = text;
-            lblStatus.ForeColor = c;
+            lblStatus.ForeColor = Ui.Resolve(c);
         }
 
         private void ApplySettingsToUi()
