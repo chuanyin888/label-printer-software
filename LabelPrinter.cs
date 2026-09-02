@@ -994,7 +994,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.1";
+        public const string AppVersion = "1.3.2";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1673,7 +1673,7 @@ namespace LabelPrinterApp
 
         private GroupBox BuildScanGroup()
         {
-            var g = new CardGroup { Text = "扫码录入", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
+            var g = new CardGroup { Text = "扫码录入", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 14), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 14, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1725,8 +1725,19 @@ namespace LabelPrinterApp
             btnClear.Click += (s, e) => ClearInputs();
             t.Controls.Add(btnClear, 1, 12);
 
-            var lblHintBottom = new Label { Text = "提示：历史记录自动保存，随时可重印。", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 4, 0, 0) };
+            // 底部提示：限制在列宽内自动换行，避免文字超出卡片被右侧/底部裁切
+            var lblHintBottom = new Label
+            {
+                Text = "提示：历史记录自动保存，\n随时可重印。",
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                AutoEllipsis = false,
+                ForeColor = Color.Gray,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 4, 0, 2)
+            };
             t.Controls.Add(lblHintBottom, 0, 13); t.SetColumnSpan(lblHintBottom, 2);
+            t.RowStyles[13] = new RowStyle(SizeType.Absolute, 36);   // 预留两行高度，确保不被截断
 
             g.Controls.Add(t);
             cmbMode.SelectedIndex = 0;
