@@ -43,6 +43,8 @@ namespace LabelPrinterApp
                 Environment.Exit(0);
             }
             try { SetProcessDPIAware(); } catch { }
+            // 启用 TLS 1.2：GitHub、Gitee 等 HTTPS 接口在新版本 .NET 上要求 TLS1.2，旧运行时默认只走 1.0/1.1 会握手失败
+            try { System.Net.ServicePointManager.SecurityProtocol |= (System.Net.SecurityProtocolType)3072; } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += (s, e) => ErrorLog.Show(e.Exception);
@@ -992,7 +994,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.0";
+        public const string AppVersion = "1.3.1";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1020,6 +1022,21 @@ namespace LabelPrinterApp
         public static UpdateCheckResult FindNewVersion(string url, string token, string current, out string newVersion, out string downloadUrl, out string notes)
         {
             newVersion = ""; downloadUrl = ""; notes = "";
+            if (string.IsNullOrWhiteSpace(url)) url = AppSettings.DefaultUpdateUrl;
+            UpdateCheckResult res = TryCheck(url, token, current, ref newVersion, ref downloadUrl, ref notes);
+            // 配置的更新源连不上时，回退到默认 Gitee 源，避免在 GitHub 访问受限的网络下误报“无法连接”
+            if (res == UpdateCheckResult.Error
+                && !string.Equals(url, AppSettings.DefaultUpdateUrl, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(AppSettings.DefaultUpdateUrl))
+            {
+                newVersion = ""; downloadUrl = ""; notes = "";
+                res = TryCheck(AppSettings.DefaultUpdateUrl, "", current, ref newVersion, ref downloadUrl, ref notes);
+            }
+            return res;
+        }
+
+        private static UpdateCheckResult TryCheck(string url, string token, string current, ref string newVersion, ref string downloadUrl, ref string notes)
+        {
             if (string.IsNullOrWhiteSpace(url)) return UpdateCheckResult.Error;
             try
             {
