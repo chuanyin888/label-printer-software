@@ -911,10 +911,13 @@ namespace LabelPrinterApp
         {
             var list = new List<DeviceRecord>();
             if (!File.Exists(_path)) return list;
-            try
+            string[] lines = null;
+            try { lines = File.ReadAllLines(_path, Encoding.UTF8); }
+            catch { return list; }
+            // 逐行解析：某一条数据格式异常只跳过该条，不拖垮整份历史文件（避免今日计数被清空）
+            for (int i = 1; i < lines.Length; i++)
             {
-                var lines = File.ReadAllLines(_path, Encoding.UTF8);
-                for (int i = 1; i < lines.Length; i++)
+                try
                 {
                     if (string.IsNullOrWhiteSpace(lines[i])) continue;
                     var f = SplitCsv(lines[i]);
@@ -932,8 +935,8 @@ namespace LabelPrinterApp
                     if (DateTime.TryParse(f[6], out pt)) r.PrintTime = pt;
                     list.Add(r);
                 }
+                catch { }
             }
-            catch { }
             return list;
         }
 
@@ -994,7 +997,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.2";
+        public const string AppVersion = "1.3.3";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2068,9 +2071,10 @@ namespace LabelPrinterApp
         private void SaveAndPrint(bool clearAfter)
         {
             var rec = CurrentRecord();
-            if (string.IsNullOrWhiteSpace(rec.SN) || string.IsNullOrWhiteSpace(rec.MAC))
+            string verr = ValidateForPrint();
+            if (verr != null)
             {
-                MessageBox.Show("SN 和 MAC 不能为空，无法打印。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(verr, "无法打印", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (cmbPrinter.SelectedItem == null)
@@ -2099,6 +2103,22 @@ namespace LabelPrinterApp
                 SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）" : "已打印并保存", dup ? Color.Red : Color.SeaGreen);
             }
             UpdateTodayCount();
+        }
+
+        // 校验将要打印的元素：勾选要打印的内容，若对应内容缺失则提示并禁止打印
+        private string ValidateForPrint()
+        {
+            bool any = chkModel.Checked || chkType.Checked || chkSN.Checked || chkMAC.Checked;
+            if (!any) return "请至少勾选一个要打印的内容（型号 / 类型 / SN / MAC）。";
+            if (chkModel.Checked && string.IsNullOrWhiteSpace(txtModel.Text))
+                return "型号为空，无法打印，请先填写或扫描型号。";
+            if (chkType.Checked && string.IsNullOrWhiteSpace(txtType.Text))
+                return "类型为空，无法打印，请先填写或扫描类型。";
+            if (chkSN.Checked && string.IsNullOrWhiteSpace(txtSN.Text))
+                return "SN 为空，无法打印，请先扫描 SN。";
+            if (chkMAC.Checked && string.IsNullOrWhiteSpace(txtMAC.Text))
+                return "MAC 为空，无法打印，请先扫描 MAC。";
+            return null;
         }
 
         private void SaveCurrent(bool clearAfter)
@@ -2256,7 +2276,9 @@ namespace LabelPrinterApp
 
         private void UpdateTodayCount()
         {
-            int n = _records.Count(r => r.PrintTime.HasValue && r.PrintTime.Value.Date == DateTime.Today);
+            // 按每条记录的“录入日期”统计今日数量：每条记录都有 Time，且重新打开后能读回，
+            // 避免旧数据/个别记录没有“打印时间”时导致今日计数归零
+            int n = _records.Count(r => r.Time.Date == DateTime.Today);
             lblToday.Text = "今日已打印：" + n + " 台";
         }
 
