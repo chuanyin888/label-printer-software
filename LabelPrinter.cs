@@ -997,7 +997,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.3";
+        public const string AppVersion = "1.3.4";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1217,6 +1217,7 @@ namespace LabelPrinterApp
             ApplySettingsToUi();
             ApplyChecksToLayout();
             ApplyBarcodeWidthToLayout();
+            RestoreLastPrinted();   // 重开软件后恢复上次打印的内容到预览
             UpdatePreview();
             UpdateTodayCount();
             _refreshTimer = new Timer { Interval = 4000 };
@@ -2091,16 +2092,20 @@ namespace LabelPrinterApp
 
             rec.PrintTime = DateTime.Now;
             bool dup = AddRecord(rec);
+            // 记录“最近打印”，供重开软件后恢复预览
+            SaveLastPrinted(rec);
             _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
             if (clearAfter)
             {
-                ClearInputs();
-                SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）" : "已打印并保存，等待下一台…", dup ? Color.Red : Color.SeaGreen);
+                // 保留最后打印内容在输入框与预览，只重置扫描状态，便于下一台扫码覆盖
+                SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "已打印并保存，等待下一台…（已保留最后预览）", dup ? Color.Red : Color.SeaGreen);
                 txtScan.Focus();
+                UpdatePreview();
             }
             else
             {
                 SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）" : "已打印并保存", dup ? Color.Red : Color.SeaGreen);
+                UpdatePreview();
             }
             UpdateTodayCount();
         }
@@ -2296,6 +2301,54 @@ namespace LabelPrinterApp
             SetStatus(_fixedModel ? "请扫描 SN 条码…" : "请扫描设备二维码…", Color.DodgerBlue);
             txtScan.Focus();
             UpdatePreview();
+        }
+
+        private string LastPrintPath { get { return Path.Combine(_dataDir, "最近打印.txt"); } }
+
+        private void SaveLastPrinted(DeviceRecord rec)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("model=" + (rec.Model ?? ""));
+                sb.AppendLine("type=" + (rec.Type ?? ""));
+                sb.AppendLine("sn=" + (rec.SN ?? ""));
+                sb.AppendLine("mac=" + (rec.MAC ?? ""));
+                sb.AppendLine("rawqr=" + (rec.RawQR ?? ""));
+                File.WriteAllText(LastPrintPath, sb.ToString(), new UTF8Encoding(true));
+            }
+            catch { }
+        }
+
+        private bool RestoreLastPrinted()
+        {
+            if (!File.Exists(LastPrintPath)) return false;
+            try
+            {
+                var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var line in File.ReadAllLines(LastPrintPath, Encoding.UTF8))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t.StartsWith("#")) continue;
+                    int eq = t.IndexOf('=');
+                    if (eq <= 0) continue;
+                    d[t.Substring(0, eq).Trim()] = t.Substring(eq + 1).Trim();
+                }
+                string sn, mac;
+                d.TryGetValue("sn", out sn); d.TryGetValue("mac", out mac);
+                if (string.IsNullOrWhiteSpace(sn) && string.IsNullOrWhiteSpace(mac)) return false;
+                string model, type, rawqr;
+                d.TryGetValue("model", out model); d.TryGetValue("type", out type); d.TryGetValue("rawqr", out rawqr);
+                txtModel.Text = model ?? "";
+                txtType.Text = type ?? "";
+                txtSN.Text = sn ?? "";
+                txtMAC.Text = mac ?? "";
+                _lastRawQR = rawqr ?? "";
+                _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
+                SetStatus(_fixedModel ? "已恢复上次打印内容，扫描下一台" : "已恢复上次打印内容，扫描下一台", Color.DodgerBlue);
+                return true;
+            }
+            catch { return false; }
         }
 
         private void SetMode(bool fixedModel)
