@@ -1003,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.6";
+        public const string AppVersion = "1.3.7";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1949,7 +1949,7 @@ namespace LabelPrinterApp
             radNasOn = new RadioButton { Text = "有", AutoSize = true, Margin = new Padding(0, 4, 10, 0) };
             radNasOff = new RadioButton { Text = "无", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
             radNasOn.CheckedChanged += (s, e) => { if (!_suppressNas) { _settings.NasSyncEnabled = radNasOn.Checked; _settings.Save(); ApplyNasState(); if (radNasOn.Checked) { StartNasBackup(); NasSyncOnce(); } } };
-            radNasOff.CheckedChanged += (s, e) => { if (!_suppressNas) { _settings.NasSyncEnabled = radNasOff.Checked; _settings.Save(); ApplyNasState(); } };
+            radNasOff.CheckedChanged += (s, e) => { if (!_suppressNas) { _settings.NasSyncEnabled = radNasOn.Checked; _settings.Save(); ApplyNasState(); } };
             toggleRow.Controls.Add(radNasOn);
             toggleRow.Controls.Add(radNasOff);
             t.Controls.Add(toggleRow, 0, 0); t.SetColumnSpan(toggleRow, 3);
