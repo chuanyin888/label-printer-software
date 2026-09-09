@@ -797,6 +797,8 @@ namespace LabelPrinterApp
         public string UpdateUrl = DefaultUpdateUrl;
         public string UpdateToken = "";
         public int BarcodeWidth = 2;   // 0=细  1=中  2=粗
+        public bool NasSyncEnabled = false;   // 是否开启 NAS 备份同步
+        public string NasPath = "";           // NAS 备份目录
         public List<LayoutItem> Layout = LayoutItem.DefaultLayout(85, 35);
 
         public string Path;
@@ -830,6 +832,8 @@ namespace LabelPrinterApp
                 if (d.ContainsKey("updateUrl")) UpdateUrl = d["updateUrl"];
                 if (d.ContainsKey("updateToken")) UpdateToken = d["updateToken"];
                 if (d.ContainsKey("barcodeWidth")) BarcodeWidth = (int)ParseD(d["barcodeWidth"], BarcodeWidth);
+                if (d.ContainsKey("nasSyncEnabled")) NasSyncEnabled = ParseB(d["nasSyncEnabled"], false);
+                if (d.ContainsKey("nasPath")) NasPath = d["nasPath"];
                 if (string.IsNullOrWhiteSpace(UpdateUrl)) UpdateUrl = DefaultUpdateUrl;
                 LabelWidthMm = Math.Max(5, Math.Min(200, LabelWidthMm));
                 LabelHeightMm = Math.Max(5, Math.Min(300, LabelHeightMm));
@@ -876,6 +880,8 @@ namespace LabelPrinterApp
                 sb.AppendLine("updateUrl=" + UpdateUrl);
                 sb.AppendLine("updateToken=" + UpdateToken);
                 sb.AppendLine("barcodeWidth=" + BarcodeWidth);
+                sb.AppendLine("nasSyncEnabled=" + (NasSyncEnabled ? "1" : "0"));
+                sb.AppendLine("nasPath=" + NasPath);
                 foreach (var it in Layout)
                 {
                     sb.AppendLine("layout." + it.Id + ".x=" + it.Xmm.ToString("0.##", CultureInfo.InvariantCulture));
@@ -997,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.4";
+        public const string AppVersion = "1.3.5";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1156,6 +1162,14 @@ namespace LabelPrinterApp
         private TextBox txtSearch;
         private Label lblCount;
         private Timer _refreshTimer;
+        // NAS 备份同步
+        private TextBox txtNasPath;
+        private RadioButton radNasOn, radNasOff;
+        private Button btnBrowseNas, btnNasSync;
+        private Label lblNasStatus;
+        private System.Windows.Forms.Timer _nasTimer;
+        private bool _nasSyncing;
+        private bool _suppressNas;
         private string _searchText = "";
 
         private enum ScanState { AwaitQR, AwaitSN, AwaitMAC }
@@ -1224,6 +1238,7 @@ namespace LabelPrinterApp
             _refreshTimer.Tick += (s, e) => { _refreshTimer.Stop(); RefreshPrinters(false); };
             Shown += (s, e) => { txtScan.Focus(); };
             Shown += (s, e) => StartAutoCheck();
+            Shown += (s, e) => StartNasBackup();
             FormClosing += (s, e) => SaveAll();
         }
 
@@ -1651,19 +1666,21 @@ namespace LabelPrinterApp
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 4,
+                RowCount = 5,
                 Padding = new Padding(0),
                 Margin = Padding.Empty
             };
-            for (int i = 0; i < 4; i++) rightCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (int i = 0; i < 5; i++) rightCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             var gp = BuildPrinterGroup(); gp.Dock = DockStyle.Top; gp.Margin = new Padding(0, 0, 0, 6);
             var gs = BuildSizeGroup(); gs.Dock = DockStyle.Top; gs.Margin = new Padding(0, 0, 0, 6);
             var gc = BuildContentGroup(); gc.Dock = DockStyle.Top; gc.Margin = new Padding(0, 0, 0, 6);
             var gprop = BuildPropGroup(); gprop.Dock = DockStyle.Top; gprop.Margin = new Padding(0, 0, 0, 4);
+            var gnas = BuildNasGroup(); gnas.Dock = DockStyle.Top; gnas.Margin = new Padding(0, 0, 0, 4);
             rightCol.Controls.Add(gp, 0, 0);
             rightCol.Controls.Add(gs, 0, 1);
             rightCol.Controls.Add(gc, 0, 2);
             rightCol.Controls.Add(gprop, 0, 3);
+            rightCol.Controls.Add(gnas, 0, 4);
             rightScroll.Controls.Add(rightCol);
 
             main.Controls.Add(leftScroll, 0, 0);
@@ -1915,6 +1932,161 @@ namespace LabelPrinterApp
 
             g.Controls.Add(t);
             return g;
+        }
+
+        private GroupBox BuildNasGroup()
+        {
+            var g = new CardGroup { Text = "NAS 数据备份（每 5 分钟同步）", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(8, 20, 8, 8), Margin = Padding.Empty };
+            var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 4, Padding = new Padding(0), Margin = Padding.Empty };
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+            for (int i = 0; i < 4; i++) t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            // 第 0 行：开关 有 / 无
+            var toggleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            toggleRow.Controls.Add(new Label { Text = "开启同步：", AutoSize = true, Margin = new Padding(0, 4, 6, 0) });
+            radNasOn = new RadioButton { Text = "有", AutoSize = true, Margin = new Padding(0, 4, 10, 0) };
+            radNasOff = new RadioButton { Text = "无", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+            radNasOn.CheckedChanged += (s, e) => { if (!_suppressNas) { _settings.NasSyncEnabled = radNasOn.Checked; _settings.Save(); ApplyNasState(); if (radNasOn.Checked) { StartNasBackup(); NasSyncOnce(); } } };
+            radNasOff.CheckedChanged += (s, e) => { if (!_suppressNas) { _settings.NasSyncEnabled = radNasOff.Checked; _settings.Save(); ApplyNasState(); } };
+            toggleRow.Controls.Add(radNasOn);
+            toggleRow.Controls.Add(radNasOff);
+            t.Controls.Add(toggleRow, 0, 0); t.SetColumnSpan(toggleRow, 3);
+
+            // 第 1 行：NAS 目录 + 浏览
+            t.Controls.Add(new Label { Text = "NAS 目录：", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 7, 6, 0) }, 0, 1);
+            txtNasPath = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 2, 0, 6) };
+            t.Controls.Add(txtNasPath, 1, 1);
+            btnBrowseNas = new RoundedButton { Text = "浏览", Dock = DockStyle.Fill, Height = 28, Margin = new Padding(2, 0, 0, 6) };
+            btnBrowseNas.Click += (s, e) => BrowseNasPath();
+            t.Controls.Add(btnBrowseNas, 2, 1);
+
+            // 第 2 行：立即同步
+            btnNasSync = new RoundedButton { Text = "立即同步", Dock = DockStyle.Left, Width = 92, Height = 28, Margin = new Padding(0, 2, 0, 4) };
+            btnNasSync.Click += (s, e) => NasSyncOnce();
+            t.Controls.Add(btnNasSync, 0, 2); t.SetColumnSpan(btnNasSync, 3);
+
+            // 第 3 行：同步状态
+            lblNasStatus = new Label { Text = "", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 4, 0, 2) };
+            t.Controls.Add(lblNasStatus, 0, 3); t.SetColumnSpan(lblNasStatus, 3);
+
+            g.Controls.Add(t);
+            _suppressNas = true;
+            radNasOn.Checked = _settings.NasSyncEnabled;
+            radNasOff.Checked = !_settings.NasSyncEnabled;
+            _suppressNas = false;
+            ApplyNasState();
+            return g;
+        }
+
+        private void ApplyNasState()
+        {
+            bool on = _settings.NasSyncEnabled;
+            _suppressNas = true;
+            if (radNasOn != null) radNasOn.Checked = on;
+            if (radNasOff != null) radNasOff.Checked = !on;
+            _suppressNas = false;
+            if (txtNasPath != null) { txtNasPath.Text = _settings.NasPath; txtNasPath.ReadOnly = !on; txtNasPath.Enabled = on; }
+            if (btnBrowseNas != null) btnBrowseNas.Enabled = on;
+            if (btnNasSync != null) btnNasSync.Enabled = on;
+            if (lblNasStatus != null)
+            {
+                if (!on) lblNasStatus.Text = "未开启 NAS 同步";
+                else if (string.IsNullOrWhiteSpace(_settings.NasPath)) lblNasStatus.Text = "请选择 NAS 目录";
+                else lblNasStatus.Text = "已开启·每 5 分钟自动同步";
+                lblNasStatus.ForeColor = Ui.Resolve(lblNasStatus.ForeColor);
+            }
+        }
+
+        private void BrowseNasPath()
+        {
+            using (var dlg = new FolderBrowserDialog())
+            {
+                dlg.Description = "选择 NAS 备份目录";
+                dlg.ShowNewFolderButton = true;
+                if (!string.IsNullOrWhiteSpace(_settings.NasPath) && Directory.Exists(_settings.NasPath))
+                    dlg.SelectedPath = _settings.NasPath;
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    _settings.NasPath = dlg.SelectedPath;
+                    _settings.Save();
+                    txtNasPath.Text = _settings.NasPath;
+                    ApplyNasState();
+                    NasSyncOnce();
+                }
+            }
+        }
+
+        private void StartNasBackup()
+        {
+            if (_nasTimer == null)
+            {
+                _nasTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+                _nasTimer.Tick += (s, e) => { _nasTimer.Stop(); NasSyncOnce(); _nasTimer.Start(); };
+                _nasTimer.Start();
+            }
+            if (_settings.NasSyncEnabled && !string.IsNullOrWhiteSpace(_settings.NasPath))
+            {
+                // 启动后约 5 秒先做一次初始同步
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    System.Threading.Thread.Sleep(5000);
+                    if (!IsDisposed) try { BeginInvoke((Action)NasSyncOnce); } catch { }
+                });
+            }
+        }
+
+        private void NasSyncOnce()
+        {
+            if (_nasSyncing) return;
+            if (!_settings.NasSyncEnabled || string.IsNullOrWhiteSpace(_settings.NasPath)) return;
+            _nasSyncing = true;
+            string localDir = _dataDir;
+            string nasDir = _settings.NasPath.Trim();
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                try { DoNasSync(localDir, nasDir); }
+                finally { _nasSyncing = false; }
+            });
+        }
+
+        private void DoNasSync(string localDir, string nasDir)
+        {
+            string statusText; Color sc = Color.SeaGreen;
+            try
+            {
+                if (!Directory.Exists(nasDir)) Directory.CreateDirectory(nasDir);
+                var files = Directory.GetFiles(localDir, "历史记录_*.csv");
+                int copied = 0, same = 0, failed = 0;
+                foreach (var lf in files)
+                {
+                    string name = Path.GetFileName(lf);
+                    string df = Path.Combine(nasDir, name);
+                    try
+                    {
+                        bool need = !File.Exists(df) || File.GetLastWriteTime(lf) > File.GetLastWriteTime(df).AddSeconds(1);
+                        if (need) { File.Copy(lf, df, true); copied++; } else same++;
+                    }
+                    catch { failed++; }
+                }
+                int total = copied + same + failed;
+                statusText = total == 0 ? "同步完成：暂无历史文件" : "同步完成：更新 " + copied + "，已最新 " + same + (failed > 0 ? "，失败 " + failed : "");
+                if (failed > 0) sc = Color.DarkOrange;
+            }
+            catch (Exception ex)
+            {
+                string m = ex.Message ?? "";
+                statusText = "同步失败：" + (m.Length > 40 ? m.Substring(0, 40) : m);
+                sc = Color.Red;
+            }
+            NotifyNasStatus(statusText, sc);
+        }
+
+        private void NotifyNasStatus(string text, Color c)
+        {
+            if (IsDisposed || lblNasStatus == null) return;
+            try { BeginInvoke((Action)(() => { if (lblNasStatus != null) { lblNasStatus.Text = text; lblNasStatus.ForeColor = Ui.Resolve(c); } })); } catch { }
         }
 
         private GroupBox BuildHistoryGroup()
