@@ -1003,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.0.0";
+        public const string AppVersion = "2.0.1";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2146,13 +2146,10 @@ namespace LabelPrinterApp
             btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
-            var btnUpdate = new RoundedButton { Text = "检查更新", Width = 170, Height = 22, Margin = Padding.Empty };
-            btnUpdate.Click += (s, e) => CheckUpdate(true);
             btnCol.Controls.Add(btnReprint);
             btnCol.Controls.Add(btnDel);
             btnCol.Controls.Add(btnClearAll);
             btnCol.Controls.Add(btnFolder);
-            btnCol.Controls.Add(btnUpdate);
             t.Controls.Add(btnCol, 1, 1);
 
             var lblRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
