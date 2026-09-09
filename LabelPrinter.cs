@@ -1003,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.5";
+        public const string AppVersion = "1.3.6";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1994,7 +1994,12 @@ namespace LabelPrinterApp
             {
                 if (!on) lblNasStatus.Text = "未开启 NAS 同步";
                 else if (string.IsNullOrWhiteSpace(_settings.NasPath)) lblNasStatus.Text = "请选择 NAS 目录";
-                else lblNasStatus.Text = "已开启·每 5 分钟自动同步";
+                else
+                {
+                    string machine = Environment.MachineName;
+                    if (string.IsNullOrWhiteSpace(machine)) machine = "本机";
+                    lblNasStatus.Text = "已开启·同步到「" + machine + "」子文件夹";
+                }
                 lblNasStatus.ForeColor = Ui.Resolve(lblNasStatus.ForeColor);
             }
         }
@@ -2057,12 +2062,17 @@ namespace LabelPrinterApp
             try
             {
                 if (!Directory.Exists(nasDir)) Directory.CreateDirectory(nasDir);
+                // 多机共用 NAS 时，按机器名建子文件夹，避免同名历史文件互相覆盖
+                string machine = Environment.MachineName;
+                if (string.IsNullOrWhiteSpace(machine)) machine = "本机";
+                string targetDir = Path.Combine(nasDir, machine);
+                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
                 var files = Directory.GetFiles(localDir, "历史记录_*.csv");
                 int copied = 0, same = 0, failed = 0;
                 foreach (var lf in files)
                 {
                     string name = Path.GetFileName(lf);
-                    string df = Path.Combine(nasDir, name);
+                    string df = Path.Combine(targetDir, name);
                     try
                     {
                         bool need = !File.Exists(df) || File.GetLastWriteTime(lf) > File.GetLastWriteTime(df).AddSeconds(1);
