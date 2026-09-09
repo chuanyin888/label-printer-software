@@ -1003,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "1.3.7";
+        public const string AppVersion = "2.0.0";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1238,7 +1238,6 @@ namespace LabelPrinterApp
             _refreshTimer.Tick += (s, e) => { _refreshTimer.Stop(); RefreshPrinters(false); };
             Shown += (s, e) => { txtScan.Focus(); };
             Shown += (s, e) => StartAutoCheck();
-            Shown += (s, e) => StartNasBackup();
             FormClosing += (s, e) => SaveAll();
         }
 
@@ -1666,21 +1665,19 @@ namespace LabelPrinterApp
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 5,
+                RowCount = 4,
                 Padding = new Padding(0),
                 Margin = Padding.Empty
             };
-            for (int i = 0; i < 5; i++) rightCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            for (int i = 0; i < 4; i++) rightCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             var gp = BuildPrinterGroup(); gp.Dock = DockStyle.Top; gp.Margin = new Padding(0, 0, 0, 6);
             var gs = BuildSizeGroup(); gs.Dock = DockStyle.Top; gs.Margin = new Padding(0, 0, 0, 6);
             var gc = BuildContentGroup(); gc.Dock = DockStyle.Top; gc.Margin = new Padding(0, 0, 0, 6);
             var gprop = BuildPropGroup(); gprop.Dock = DockStyle.Top; gprop.Margin = new Padding(0, 0, 0, 4);
-            var gnas = BuildNasGroup(); gnas.Dock = DockStyle.Top; gnas.Margin = new Padding(0, 0, 0, 4);
             rightCol.Controls.Add(gp, 0, 0);
             rightCol.Controls.Add(gs, 0, 1);
             rightCol.Controls.Add(gc, 0, 2);
             rightCol.Controls.Add(gprop, 0, 3);
-            rightCol.Controls.Add(gnas, 0, 4);
             rightScroll.Controls.Add(rightCol);
 
             main.Controls.Add(leftScroll, 0, 0);
@@ -2260,7 +2257,8 @@ namespace LabelPrinterApp
                 MessageBox.Show(verr, "无法打印", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            if (cmbPrinter.SelectedItem == null)
+            bool testMode = ShellApp.Globals.TestMode;
+            if (!testMode && cmbPrinter.SelectedItem == null)
             {
                 MessageBox.Show("没有可用打印机，请先在右侧选择打印机。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
@@ -2280,13 +2278,17 @@ namespace LabelPrinterApp
             if (clearAfter)
             {
                 // 保留最后打印内容在输入框与预览，只重置扫描状态，便于下一台扫码覆盖
-                SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "已打印并保存，等待下一台…（已保留最后预览）", dup ? Color.Red : Color.SeaGreen);
+                SetStatus(testMode
+                    ? (dup ? "测试模式：已模拟打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "测试模式：已模拟打印并保存，等待下一台…（已保留最后预览）")
+                    : (dup ? "已打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "已打印并保存，等待下一台…（已保留最后预览）"), dup ? Color.Red : (testMode ? Color.DarkOrange : Color.SeaGreen));
                 txtScan.Focus();
                 UpdatePreview();
             }
             else
             {
-                SetStatus(dup ? "已打印并保存（注意：该设备之前已录入过）" : "已打印并保存", dup ? Color.Red : Color.SeaGreen);
+                SetStatus(testMode
+                    ? (dup ? "测试模式：已模拟打印并保存（注意：该设备之前已录入过）" : "测试模式：已模拟打印并保存")
+                    : (dup ? "已打印并保存（注意：该设备之前已录入过）" : "已打印并保存"), dup ? Color.Red : (testMode ? Color.DarkOrange : Color.SeaGreen));
                 UpdatePreview();
             }
             UpdateTodayCount();
@@ -2324,7 +2326,8 @@ namespace LabelPrinterApp
 
         private void Reprint(DeviceRecord rec)
         {
-            if (cmbPrinter.SelectedItem == null)
+            bool testMode = ShellApp.Globals.TestMode;
+            if (!testMode && cmbPrinter.SelectedItem == null)
             {
                 MessageBox.Show("没有可用打印机，请先选择打印机。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
@@ -2338,11 +2341,17 @@ namespace LabelPrinterApp
             SaveAll();
             LoadHistoryGrid();
             UpdateTodayCount();
-            SetStatus("已重印：" + rec.SN, Color.SeaGreen);
+            SetStatus(testMode ? ("测试模式：已模拟重印并保存：" + rec.SN) : ("已重印：" + rec.SN), testMode ? Color.DarkOrange : Color.SeaGreen);
         }
 
         private bool PrintBitmap(DeviceRecord rec, string printerName)
         {
+            // 全局测试模式：不实际输出到打印机，但“模拟打印成功”，后续保存/计数照常进行
+            if (ShellApp.Globals.TestMode)
+            {
+                System.Threading.Thread.Sleep(400);
+                return true;
+            }
             try
             {
                 using (var pd = new PrintDocument())
@@ -2862,6 +2871,15 @@ namespace LabelPrinterApp
         {
             _settings.Save();
             _history.Save(_records);
+        }
+
+        // 嵌入到壳程序后，原 FormClosing 不触发，改由壳在关闭时调用本方法保存
+        public void Shutdown()
+        {
+            try { _settings.Save(); } catch { }
+            try { _history.Save(_records); } catch { }
+            try { if (_refreshTimer != null) _refreshTimer.Stop(); } catch { }
+            try { if (_nasTimer != null) _nasTimer.Stop(); } catch { }
         }
     }
 }
