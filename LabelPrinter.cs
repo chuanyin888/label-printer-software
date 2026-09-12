@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -1018,6 +1018,39 @@ namespace LabelPrinterApp
         private readonly string _path;
         public HistoryStore(string path) { _path = path; }
 
+        // 严格读取：返回 false 表示“文件存在但读不出来”（调用方不要覆盖它，避免把还能抢救的文件清掉）
+        public bool TryLoad(out List<DeviceRecord> list)
+        {
+            list = new List<DeviceRecord>();
+            if (!File.Exists(_path)) return true;   // 不存在 = 空，属于正常情况
+            string[] lines;
+            try { lines = File.ReadAllLines(_path, Encoding.UTF8); }
+            catch { return false; }
+            for (int i = 1; i < lines.Length; i++)
+            {
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(lines[i])) continue;
+                    var f = SplitCsv(lines[i]);
+                    if (f.Length < 7) continue;
+                    var r = new DeviceRecord();
+                    DateTime t;
+                    DateTime.TryParse(f[0], out t);
+                    r.Time = t;
+                    r.Model = f[1];
+                    r.Type = f[2];
+                    r.SN = f[3];
+                    r.MAC = f[4];
+                    r.RawQR = f[5];
+                    DateTime pt;
+                    if (DateTime.TryParse(f[6], out pt)) r.PrintTime = pt;
+                    list.Add(r);
+                }
+                catch { }
+            }
+            return true;
+        }
+
         public List<DeviceRecord> Load()
         {
             var list = new List<DeviceRecord>();
@@ -1108,7 +1141,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-       public const string AppVersion = "2.0.8";
+       public const string AppVersion = "2.0.9";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1488,6 +1521,15 @@ namespace LabelPrinterApp
                 e.Graphics.DrawLine(pen, x + 10, y, x + 10, y + 4);
             }
         }
+    }
+
+    // 由「一体化壳」注入的 NAS 钩子。
+    // 单独编译标签打印软件时这些都为 null，功能照常，不影响单文件源码可用。
+    internal static class NasHook
+    {
+        public static Func<bool> IsEnabled;      // 是否已开启 NAS 同步
+        public static Func<string> MachineName;  // 本机在 NAS 上的子文件夹名
+        public static Action ClearHistory;       // 清空 NAS 上“本机”的历史记录
     }
 
     internal class MainForm : Form
@@ -1959,7 +2001,7 @@ namespace LabelPrinterApp
             btnDel.Click += (s, e) => DeleteSelected();
             gHist.Controls.Add(btnDel);
             var btnClearAll = new RoundedButton { Text = "清空全部", Location = new Point(802, 78), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
-            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); _newKeys.Clear(); _deletedKeys.Clear(); DeleteAllHistoryFiles(); LoadHistoryGrid(); UpdateTodayCount(); } };
+            btnClearAll.Click += (s, e) => ClearAllHistory();
             gHist.Controls.Add(btnClearAll);
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Location = new Point(802, 106), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
@@ -2502,7 +2544,7 @@ namespace LabelPrinterApp
             var btnDel = new RoundedButton { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnDel.Click += (s, e) => DeleteSelected();
             var btnClearAll = new RoundedButton { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
-            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); _newKeys.Clear(); _deletedKeys.Clear(); DeleteAllHistoryFiles(); LoadHistoryGrid(); UpdateTodayCount(); } };
+            btnClearAll.Click += (s, e) => ClearAllHistory();
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
             btnCol.Controls.Add(btnReprint);
@@ -2790,6 +2832,7 @@ namespace LabelPrinterApp
             var rec = SelectedRecord();
             if (rec == null) return;
             _deletedKeys.Add(RecKey(rec));
+            AddTombstone(rec);          // 记下“这条被删了”，避免下次 NAS 同步又合并回来
             _records.Remove(rec);
             SaveAll();
             LoadHistoryGrid();
@@ -3299,6 +3342,9 @@ namespace LabelPrinterApp
                     string key = r.Time.ToString("yyyy-MM-dd HH:mm:ss") + "|" + (r.SN ?? "") + "|" + (r.MAC ?? "");
                     if (seen.Add(key)) uniq.Add(r);
                 }
+                // 本机删除过的记录不再显示（避免重开软件后“删了又回来”）
+                var tomb = LoadTombstones();
+                if (tomb.Count > 0) uniq.RemoveAll(delegate(DeviceRecord r) { return tomb.Contains(RecKey(r)); });
                 uniq.Sort((a, b) => b.Time.CompareTo(a.Time));
                 all = uniq;
             }
@@ -3310,6 +3356,38 @@ namespace LabelPrinterApp
         {
             if (r == null) return "";
             return r.Time.ToString("yyyy-MM-dd HH:mm:ss") + "|" + (r.SN ?? "") + "|" + (r.MAC ?? "");
+        }
+
+        // ---------- 删除标记（墓碑）：本机删掉的记录，不要再被 NAS 合并回来 ----------
+        private string TombstonePath { get { return Path.Combine(_dataDir, "删除记录.txt"); } }
+
+        private HashSet<string> LoadTombstones()
+        {
+            var set = new HashSet<string>();
+            try
+            {
+                string p = TombstonePath;
+                if (File.Exists(p))
+                    foreach (var line in File.ReadAllLines(p, Encoding.UTF8))
+                    {
+                        string t = line.Trim();
+                        if (t.Length > 0 && t.IndexOf('|') > 0) set.Add(t);
+                    }
+            }
+            catch { }
+            return set;
+        }
+
+        private void AddTombstone(DeviceRecord r)
+        {
+            try
+            {
+                string k = RecKey(r);
+                if (string.IsNullOrEmpty(k)) return;
+                if (!Directory.Exists(_dataDir)) Directory.CreateDirectory(_dataDir);
+                File.AppendAllText(TombstonePath, k + "\r\n", new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         // 按“录入日期”把记录写回各自的按天文件。
@@ -3346,16 +3424,84 @@ namespace LabelPrinterApp
                 foreach (var kv in groups)
                     new HistoryStore(Path.Combine(_dataDir, "历史记录_" + kv.Key.ToString("yyyy-MM-dd") + ".csv")).Save(kv.Value);
 
-                // 已经没有任何记录的旧“按天”文件：清空为只剩表头
+                // 某天已经没有记录了：只有当“文件里的每一条都是被明确删掉的”才清空该文件。
+                // 文件读不出来、或里面还有没被删除的记录，一律保持原样——绝不清空，
+                // 否则一旦本机历史出问题（文件损坏/读不到），会把仅存的数据连同 NAS 备份一起抹掉。
+                var tomb2 = LoadTombstones();
                 foreach (var file in Directory.GetFiles(_dataDir, "历史记录_*.csv"))
                 {
                     string name = Path.GetFileNameWithoutExtension(file);
                     string ds = name.Substring(name.LastIndexOf('_') + 1);
                     DateTime d;
                     if (!DateTime.TryParseExact(ds, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
-                    if (!groups.ContainsKey(d.Date))
-                        new HistoryStore(file).Save(new List<DeviceRecord>());
+                    if (groups.ContainsKey(d.Date)) continue;
+                    List<DeviceRecord> rows;
+                    if (!new HistoryStore(file).TryLoad(out rows)) continue;
+                    if (rows.Count == 0) continue;
+                    bool allDeleted = true;
+                    foreach (var r in rows)
+                    {
+                        string k = RecKey(r);
+                        if (!_deletedKeys.Contains(k) && !tomb2.Contains(k)) { allDeleted = false; break; }
+                    }
+                    if (allDeleted) new HistoryStore(file).Save(new List<DeviceRecord>());
                 }
+            }
+            catch { }
+        }
+
+        // 清空全部历史：本机 +（可选）NAS 上本机那份；带二次确认，避免误删
+        private void ClearAllHistory()
+        {
+            if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            bool nasOn = false;
+            string mn = "";
+            try
+            {
+                nasOn = NasHook.IsEnabled != null && NasHook.IsEnabled();
+                if (nasOn && NasHook.MachineName != null) mn = NasHook.MachineName();
+            }
+            catch { }
+
+            bool clearNas = false;
+            if (nasOn)
+            {
+                var r = MessageBox.Show(
+                    "是否同时清空 NAS 上本机（" + mn + "）的历史记录？\n\n" +
+                    "是：NAS 也一起清空（彻底删除）。\n" +
+                    "否：只清空本机，NAS 备份保留——下次同步会把 NAS 里的记录合并回来。",
+                    "NAS 备份", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                clearNas = (r == DialogResult.Yes);
+            }
+
+            _records.Clear();
+            _newKeys.Clear();
+            _deletedKeys.Clear();
+            DeleteAllHistoryFiles();
+            try { if (File.Exists(TombstonePath)) File.Delete(TombstonePath); } catch { }   // 全清了，删除标记也没意义了
+            if (clearNas)
+            {
+                bool ok = false;
+                try { if (NasHook.ClearHistory != null) { NasHook.ClearHistory(); ok = true; } } catch { }
+                SetStatus(ok ? "已清空本机与 NAS 的历史记录" : "已清空本机历史（NAS 未清空）", ok ? Color.SeaGreen : Color.DarkOrange);
+            }
+            LoadHistoryGrid();
+            UpdateTodayCount();
+        }
+
+        // 供壳程序在“NAS 合并回来数据”后刷新界面
+        internal int TestHistoryCount { get { return _records.Count; } }
+        internal int TestGridRows { get { return grid == null ? -1 : grid.Rows.Count; } }
+
+        public void ReloadHistoryFromDisk()
+        {
+            try
+            {
+                _records.Clear();
+                _records.AddRange(LoadAllHistory());
+                LoadHistoryGrid();
+                UpdateTodayCount();
             }
             catch { }
         }
