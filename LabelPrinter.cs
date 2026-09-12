@@ -411,18 +411,123 @@ namespace LabelPrinterApp
                 Application.DoEvents();
                 int w = Math.Max(1, f.ClientSize.Width);
                 int h = Math.Max(1, f.ClientSize.Height);
+                // 先把整窗（含标题栏）画出来，再裁出客户区，避免底部被“假裁切”
+                var full = new Bitmap(Math.Max(1, f.Width), Math.Max(1, f.Height));
+                using (var g = Graphics.FromImage(full)) g.Clear(Color.White);
+                f.DrawToBitmap(full, new Rectangle(0, 0, full.Width, full.Height));
+                Rectangle cr = f.RectangleToScreen(f.ClientRectangle);
+                Rectangle wr = f.Bounds;
+                int ox = Math.Max(0, cr.X - wr.X), oy = Math.Max(0, cr.Y - wr.Y);
                 var bmp = new Bitmap(w, h);
-                // fill background white then draw
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.White);
+                    g.DrawImage(full, new Rectangle(0, 0, w, h), new Rectangle(ox, oy, w, h), GraphicsUnit.Pixel);
                 }
-                f.DrawToBitmap(bmp, new Rectangle(0, 0, w, h));
+                full.Dispose();
                 bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                 bmp.Dispose();
                 f.Dispose();
             }
+            catch (Exception ex) { try { System.IO.File.WriteAllText(path + ".err", ex.ToString()); } catch { } }
+        }
+    }
+
+    internal static class CalPreview
+    {
+        // 自测用：从本机“数据”目录统计每天的记录数
+        private static Func<DateTime, int> SampleCounts()
+        {
+            string dataDir = System.IO.Path.Combine(Application.StartupPath, "数据");
+            var counts = new Dictionary<string, int>();
+            try
+            {
+                if (Directory.Exists(dataDir))
+                {
+                    foreach (var fp in Directory.GetFiles(dataDir, "历史记录_*.csv"))
+                    {
+                        string day = System.IO.Path.GetFileNameWithoutExtension(fp).Substring("历史记录_".Length);
+                        int n = 0;
+                        using (var sr = new StreamReader(fp, Encoding.UTF8, true))
+                        {
+                            while (sr.ReadLine() != null) n++;
+                        }
+                        if (n > 1) counts[day] = n - 1;
+                    }
+                }
+            }
             catch { }
+            return delegate(DateTime d)
+            {
+                int v;
+                return counts.TryGetValue(d.ToString("yyyy-MM-dd"), out v) ? v : 0;
+            };
+        }
+
+        // 自测：把日历面板直接渲染成 PNG，用于检查“有记录日期浅灰底”的效果
+        public static void Run(string path)
+        {
+            try
+            {
+                Func<DateTime, int> cp = SampleCounts();
+                var p = new CalendarPanel();
+                p.CountProvider = cp;
+                p.Selected = new DateTime(2026, 9, 12);
+                p.ViewMonth = new DateTime(2026, 9, 1);
+                var bmp = new Bitmap(p.Width + 2, p.Height + 2);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.White);
+                    p.DrawToBitmap(bmp, new Rectangle(0, 0, p.Width, p.Height));
+                }
+                bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                bmp.Dispose();
+            }
+            catch (Exception ex) { try { System.IO.File.WriteAllText(path + ".err", ex.ToString()); } catch { } }
+        }
+
+        // 自测：把“点击日期框后弹出的整块日历”渲染成 PNG
+        public static void RunPopup(string path)
+        {
+            try
+            {
+                var host = new Form();
+                host.FormBorderStyle = FormBorderStyle.None;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-4000, -4000);
+                host.ClientSize = new Size(300, 80);
+                var pick = new CalDatePicker();
+                pick.CountProvider = SampleCounts();
+                pick.Value = new DateTime(2026, 9, 12);
+                pick.Location = new Point(12, 20);
+                host.Controls.Add(pick);
+                host.Show();
+                Application.DoEvents();
+                pick.ShowDrop();
+                Application.DoEvents();
+                var pop = pick.PopupForm;
+                var bmp = new Bitmap(pop.Width, pop.Height);
+                pop.DrawToBitmap(bmp, new Rectangle(0, 0, pop.Width, pop.Height));
+                bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                bmp.Dispose();
+                // 模拟“点一下 2026-09-05 那一格”，验证能选中并回调
+                var panel = pick.PopupForm.Controls[0] as CalendarPanel;
+                bool fired = false;
+                pick.ValueChanged += (s, e) => fired = true;
+                DateTime want = new DateTime(2026, 9, 5);
+                for (int r = 0; r < 6 && !fired; r++)
+                    for (int c = 0; c < 7 && !fired; c++)
+                    {
+                        var pt = new Point(1 + c * 34 + 17, 1 + 30 + 22 + r * 27 + 13);
+                        if (panel.SimDateAt(pt).Date == want) panel.SimClick(pt);
+                    }
+                System.IO.File.WriteAllText(path + ".log",
+                    "clickedDate=" + want.ToString("yyyy-MM-dd") + " pickerValue=" + pick.Value.ToString("yyyy-MM-dd") +
+                    " valueChangedFired=" + fired + " popupVisibleAfterClick=" + pop.Visible);
+                pick.HideDrop();
+                host.Dispose();
+            }
+            catch (Exception ex) { try { System.IO.File.WriteAllText(path + ".err", ex.ToString()); } catch { } }
         }
     }
 
@@ -1003,7 +1108,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.0.7";
+       public const string AppVersion = "2.0.8";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1139,6 +1244,252 @@ namespace LabelPrinterApp
         }
     }
 
+    // 自绘日历面板：有记录的日期显示“浅灰底”，悬停显示当天数量，点击选择日期
+    internal class CalendarPanel : Control
+    {
+        private DateTime _selected = DateTime.Today;
+        private DateTime _viewMonth = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
+        public DateTime Selected { get { return _selected; } set { _selected = value; Invalidate(); } }
+        public DateTime ViewMonth { get { return _viewMonth; } set { _viewMonth = value; Invalidate(); } }
+        public Func<DateTime, int> CountProvider;
+        public event EventHandler DateClicked;
+
+        private const int CellW = 34, CellH = 27, HeadH = 30, WeekH = 22, FootH = 24;
+        private readonly ToolTip _tip = new ToolTip { InitialDelay = 150, ReshowDelay = 60 };
+        private DateTime _hover = DateTime.MinValue;
+
+        public CalendarPanel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Width = CellW * 7 + 2;
+            Height = HeadH + WeekH + CellH * 6 + FootH + 2;
+            BackColor = Color.White;
+        }
+
+        private Rectangle TodayRect { get { return new Rectangle(1, Height - 1 - FootH, 62, FootH); } }
+
+        private Rectangle CellRect(int r, int c) { return new Rectangle(1 + c * CellW, 1 + HeadH + WeekH + r * CellH, CellW, CellH); }
+
+        private bool TryDateAt(Point p, out DateTime d)
+        {
+            d = DateTime.MinValue;
+            int gx = p.X - 1, gy = p.Y - 1 - HeadH - WeekH;
+            if (gx < 0 || gy < 0) return false;
+            int c = gx / CellW, r = gy / CellH;
+            if (c > 6 || r > 5) return false;
+            int lead = (int)ViewMonth.DayOfWeek;
+            d = ViewMonth.AddDays(-lead + r * 7 + c);
+            return true;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Color.White);
+            using (var pen = new Pen(Ui.Border)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            int w = Width - 2;
+            using (var b = new SolidBrush(Color.FromArgb(247, 249, 250))) g.FillRectangle(b, 1, 1, w, HeadH);
+            TextRenderer.DrawText(g, "◀", Font, new Rectangle(6, 1, 24, HeadH), Ui.TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, "▶", Font, new Rectangle(Width - 30, 1, 24, HeadH), Ui.TextMuted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, ViewMonth.ToString("yyyy年M月"), Ui.HeadingFont, new Rectangle(1, 1, w, HeadH), Ui.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            string[] wk = { "日", "一", "二", "三", "四", "五", "六" };
+            for (int i = 0; i < 7; i++)
+                TextRenderer.DrawText(g, wk[i], Font, new Rectangle(1 + i * CellW, 1 + HeadH, CellW, WeekH), Ui.TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            int lead = (int)ViewMonth.DayOfWeek;
+            DateTime start = ViewMonth.AddDays(-lead);
+            for (int r = 0; r < 6; r++)
+            {
+                for (int c = 0; c < 7; c++)
+                {
+                    DateTime d = start.AddDays(r * 7 + c);
+                    var rect = CellRect(r, c);
+                    bool has = CountProvider != null && CountProvider(d) > 0;
+                    bool inMonth = d.Year == ViewMonth.Year && d.Month == ViewMonth.Month;
+                    bool sel = d.Date == Selected.Date;
+                    bool hov = d.Date == _hover;
+                    if (sel) { using (var b = new SolidBrush(Ui.AccentSoft)) g.FillRectangle(b, rect); }
+                    else if (has) { using (var b = new SolidBrush(hov ? Color.FromArgb(210, 219, 228) : Color.FromArgb(222, 229, 236))) g.FillRectangle(b, rect); }
+                    else if (hov) { using (var b = new SolidBrush(Color.FromArgb(244, 247, 249))) g.FillRectangle(b, rect); }
+                    Color tc = inMonth ? Ui.Text : Color.FromArgb(188, 195, 202);
+                    if (sel) tc = Ui.Accent;
+                    else if (has && !inMonth) tc = Color.FromArgb(150, 160, 170);
+                    TextRenderer.DrawText(g, d.Day.ToString(), Font, rect, tc, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+            }
+            // 底部：快捷“今天” + 说明
+            int fy = Height - 1 - FootH;
+            using (var pen = new Pen(Ui.Border)) g.DrawLine(pen, 1, fy, Width - 2, fy);
+            using (var b = new SolidBrush(Color.FromArgb(247, 249, 250))) g.FillRectangle(b, 1, fy + 1, w, FootH - 1);
+            var tr = TodayRect;
+            if (tr.Contains(PointToClient(Cursor.Position))) { using (var b = new SolidBrush(Ui.AccentSoft)) g.FillRectangle(b, tr); }
+            TextRenderer.DrawText(g, "今天", Ui.HeadingFont, tr, Ui.Accent, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, "浅灰底 = 当天有记录", Font, new Rectangle(tr.Right, fy + 1, Width - 2 - tr.Right, FootH - 1), Ui.TextMuted,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            DateTime d;
+            if (TryDateAt(e.Location, out d))
+            {
+                if (d.Date != _hover) { _hover = d.Date; Invalidate(); }
+                int n = CountProvider != null ? CountProvider(d) : 0;
+                _tip.Show(d.ToString("yyyy-MM-dd") + (n > 0 ? ("：当天 " + n + " 条记录") : "：无记录"), this, e.X + 14, e.Y + 18, 1500);
+            }
+            else
+            {
+                if (_hover != DateTime.MinValue) { _hover = DateTime.MinValue; Invalidate(); }
+                _tip.Hide(this);
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _hover = DateTime.MinValue; _tip.Hide(this); Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            HandleClick(e.Location);
+        }
+
+        // 供自测调用：模拟一次鼠标点击
+        internal void SimClick(Point p) { HandleClick(p); }
+        internal DateTime SimDateAt(Point p) { DateTime d; return TryDateAt(p, out d) ? d : DateTime.MinValue; }
+
+        private void HandleClick(Point loc)
+        {
+            MouseEventArgs e = new MouseEventArgs(MouseButtons.Left, 1, loc.X, loc.Y, 0);
+            if (TodayRect.Contains(e.Location))
+            {
+                Selected = DateTime.Today;
+                ViewMonth = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
+                Invalidate();
+                if (DateClicked != null) DateClicked(this, EventArgs.Empty);
+                return;
+            }
+            if (e.X >= 1 && e.X <= 30 && e.Y >= 1 && e.Y <= 1 + HeadH) { ViewMonth = ViewMonth.AddMonths(-1); Invalidate(); return; }
+            if (e.X >= Width - 31 && e.X <= Width - 1 && e.Y >= 1 && e.Y <= 1 + HeadH) { ViewMonth = ViewMonth.AddMonths(1); Invalidate(); return; }
+            DateTime d;
+            if (TryDateAt(e.Location, out d))
+            {
+                Selected = d.Date;
+                Invalidate();
+                if (DateClicked != null) DateClicked(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    // 日期选择控件：点击弹出上面的自绘日历；显示当前选择的日期
+    internal class CalDatePicker : Control
+    {
+        private DateTime _value = DateTime.Today;
+        public DateTime Value { get { return _value; } set { _value = value; Invalidate(); } }
+        public Func<DateTime, int> CountProvider;
+        // 关闭弹层后要把光标还给的控件（一般是扫码输入框，保证扫码不丢）
+        public Control FocusAfterClose;
+        public event EventHandler ValueChanged;
+
+        private Form _pop;
+        private CalendarPanel _panel;
+
+        // 供自测使用
+        internal Form PopupForm { get { return _pop; } }
+
+        public CalDatePicker()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Height = 26; Width = 128; Cursor = Cursors.Hand; BackColor = Color.White;
+            _panel = new CalendarPanel();
+            _panel.DateClicked += (s, e) =>
+            {
+                Value = _panel.Selected.Date;
+                HideDrop();
+                if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+            };
+            _pop = new Form();
+            _pop.FormBorderStyle = FormBorderStyle.None;
+            _pop.ShowInTaskbar = false;
+            _pop.StartPosition = FormStartPosition.Manual;
+            _pop.TopMost = true;
+            _pop.BackColor = Color.White;
+            _pop.ClientSize = new Size(_panel.Width, _panel.Height);
+            _panel.Location = new Point(0, 0);
+            _pop.Controls.Add(_panel);
+            _pop.Deactivate += (s, e) => HideDrop();
+            _pop.KeyPreview = true;
+            _pop.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) HideDrop(); };
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            ShowDrop();
+        }
+
+        internal void ShowDrop()
+        {
+            try
+            {
+                _panel.CountProvider = CountProvider;
+                _panel.Selected = Value.Date;
+                _panel.ViewMonth = new DateTime(Value.Year, Value.Month, 1);
+                Point p = PointToScreen(new Point(0, Height));
+                Screen scr = Screen.FromControl(this);
+                if (p.Y + _pop.Height > scr.WorkingArea.Bottom) p.Y = PointToScreen(new Point(0, 0)).Y - _pop.Height;
+                if (p.X + _pop.Width > scr.WorkingArea.Right) p.X = scr.WorkingArea.Right - _pop.Width;
+                if (p.X < scr.WorkingArea.Left) p.X = scr.WorkingArea.Left;
+                if (p.Y < scr.WorkingArea.Top) p.Y = scr.WorkingArea.Top;
+                _pop.Location = p;
+                try { if (FindForm() != null) _pop.Show(FindForm()); else _pop.Show(); }
+                catch { try { _pop.Show(); } catch { } }
+                _pop.BringToFront();
+                _pop.Activate();
+            }
+            catch { }
+        }
+
+        internal void HideDrop()
+        {
+            try
+            {
+                if (_pop.Visible)
+                {
+                    _pop.Hide();
+                    if (FindForm() != null) FindForm().Activate();
+                }
+            }
+            catch { }
+            // 还光标：避免选完日期后扫码枪的输入丢到别处
+            try { if (FocusAfterClose != null && FocusAfterClose.CanFocus) FocusAfterClose.Focus(); } catch { }
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            base.OnHandleDestroyed(e);
+            try { _pop.Dispose(); } catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Color.White);
+            using (var pen = new Pen(Ui.Border)) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            TextRenderer.DrawText(e.Graphics, Value.ToString("yyyy-MM-dd"), Font, new Rectangle(7, 0, Width - 28, Height), Ui.Text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            int x = Width - 21, y = (Height - 12) / 2;
+            using (var pen = new Pen(Ui.TextMuted))
+            {
+                e.Graphics.DrawRectangle(pen, x, y + 2, 14, 11);
+                e.Graphics.DrawLine(pen, x, y + 5, x + 14, y + 5);
+                e.Graphics.DrawLine(pen, x + 4, y, x + 4, y + 4);
+                e.Graphics.DrawLine(pen, x + 10, y, x + 10, y + 4);
+            }
+        }
+    }
+
     internal class MainForm : Form
     {
         private AppSettings _settings = new AppSettings();
@@ -1162,6 +1513,8 @@ namespace LabelPrinterApp
         private DataGridView grid;
         private TextBox txtSearch;
         private Label lblCount;
+        private CalDatePicker dpHistory;
+        private DateTime _filterDate = DateTime.Today;
         private Timer _refreshTimer;
         // NAS 备份同步
         private TextBox txtNasPath;
@@ -1219,7 +1572,15 @@ namespace LabelPrinterApp
 
             BuildUi2();
             ApplyUi();
+            if (dpHistory != null) dpHistory.FocusAfterClose = txtScan;   // 选完日期把光标还给扫码框
             RefreshPrinters(true);
+            // 默认显示“最近有记录的那一天”，避免打开时是空的（可用日历悬停看哪天有记录）
+            if (dpHistory != null && _records.Count > 0)
+            {
+                DateTime latest = _records.Max(r => r.Time.Date);
+                _filterDate = latest;
+                dpHistory.Value = latest;
+            }
             LoadHistoryGrid();
             ApplySettingsToUi();
             ApplyChecksToLayout();
@@ -1819,15 +2180,15 @@ namespace LabelPrinterApp
             var g = new CardGroup { Text = "标签规格", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 22, 10, 10), Margin = Padding.Empty };
             var t = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 3, Padding = new Padding(0), Margin = Padding.Empty };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             t.Controls.Add(new Label { Text = "宽", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 10) }, 0, 0);
-            numW = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 5, Maximum = 200, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 6, 10, 10) };
+            numW = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 5, Maximum = 200, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 6, 8, 10) };
             t.Controls.Add(numW, 1, 0);
             t.Controls.Add(new Label { Text = "高", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 10) }, 2, 0);
             numH = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 5, Maximum = 300, DecimalPlaces = 1, Increment = 0.5m, Margin = new Padding(0, 6, 0, 10) };
@@ -2105,6 +2466,11 @@ namespace LabelPrinterApp
             txtSearch.TextChanged += (s, e) => { _searchText = txtSearch.Text.Trim(); LoadHistoryGrid(); };
             searchRow.Controls.Add(txtSearch);
             searchRow.Controls.Add(new Label { Text = "可输完整 SN/MAC 或后几位", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 3, 0, 6) });
+            searchRow.Controls.Add(new Label { Text = "日期：", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(20, 3, 4, 6) });
+            dpHistory = new CalDatePicker { Value = DateTime.Today, Margin = new Padding(0, 0, 0, 6) };
+            dpHistory.CountProvider = HistCountForDate;
+            dpHistory.ValueChanged += (s, e) => { _filterDate = dpHistory.Value.Date; LoadHistoryGrid(); };
+            searchRow.Controls.Add(dpHistory);
             t.Controls.Add(searchRow, 0, 0); t.SetColumnSpan(searchRow, 2);
 
             grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, ScrollBars = ScrollBars.Vertical, Margin = new Padding(0, 0, 8, 8) };
@@ -2402,6 +2768,12 @@ namespace LabelPrinterApp
                        _records.Any(r => r.SN == rec.SN && r.MAC == rec.MAC);
             _records.Insert(0, rec);
             _newKeys.Add(RecKey(rec));
+            // 刚扫的记录属于今天：切回“今天”，保证能看到
+            if (_filterDate.Date != DateTime.Today)
+            {
+                _filterDate = DateTime.Today;
+                if (dpHistory != null) dpHistory.Value = DateTime.Today;
+            }
             SaveAll();
             LoadHistoryGrid();
             return dup;
@@ -2427,9 +2799,10 @@ namespace LabelPrinterApp
         {
             grid.SuspendLayout();
             grid.Rows.Clear();
-            List<DeviceRecord> list = _records;
+            DateTime day = _filterDate.Date;
+            List<DeviceRecord> list = _records.Where(r => r.Time.Date == day).ToList();
             if (!string.IsNullOrEmpty(_searchText))
-                list = _records.Where(r =>
+                list = list.Where(r =>
                     (!string.IsNullOrEmpty(r.SN) && r.SN.IndexOf(_searchText, StringComparison.OrdinalIgnoreCase) >= 0) ||
                     (!string.IsNullOrEmpty(r.MAC) && r.MAC.IndexOf(_searchText, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
             foreach (var r in list)
@@ -2445,9 +2818,52 @@ namespace LabelPrinterApp
             }
             grid.ResumeLayout();
             if (lblCount != null)
+            {
+                string ds = _filterDate.ToString("yyyy-MM-dd");
                 lblCount.Text = string.IsNullOrEmpty(_searchText)
-                    ? "共 " + _records.Count + " 条记录"
-                    : "共 " + _records.Count + " 条记录（匹配 " + list.Count + " 条）";
+                    ? ("历史共 " + _records.Count + " 条 · " + ds + " 当天 " + list.Count + " 条")
+                    : ("历史共 " + _records.Count + " 条 · " + ds + " 匹配 " + list.Count + " 条");
+            }
+        }
+
+        // 供日期控件“悬停某天”显示当天记录数
+        private int HistCountForDate(DateTime d)
+        {
+            DateTime day = d.Date;
+            return _records.Count(r => r.Time.Date == day);
+        }
+
+        // 自测：打开日历 → 模拟点击目标日期 → 看表格是否只剩那天
+        internal string TestDateFilter(DateTime target)
+        {
+            if (dpHistory == null) return "no picker";
+            dpHistory.ShowDrop();
+            Application.DoEvents();
+            var panel = dpHistory.PopupForm.Controls[0] as CalendarPanel;
+            if (panel == null) return "no panel";
+            bool clicked = false;
+            for (int r = 0; r < 6 && !clicked; r++)
+                for (int c = 0; c < 7 && !clicked; c++)
+                {
+                    var pt = new Point(1 + c * 34 + 17, 1 + 30 + 22 + r * 27 + 13);
+                    if (panel.SimDateAt(pt).Date == target.Date) { panel.SimClick(pt); clicked = true; }
+                }
+            Application.DoEvents();
+            // 翻月箭头
+            string m0 = panel.ViewMonth.ToString("yyyy-MM");
+            panel.SimClick(new Point(14, 15));
+            string mPrev = panel.ViewMonth.ToString("yyyy-MM");
+            panel.SimClick(new Point(panel.Width - 14, 15));
+            string mBack = panel.ViewMonth.ToString("yyyy-MM");
+            // “今天”按钮
+            panel.SimClick(new Point(30, panel.Height - 12));
+            Application.DoEvents();
+            string afterToday = dpHistory.Value.ToString("yyyy-MM-dd") + "/" + _filterDate.ToString("yyyy-MM-dd");
+            return "want=" + target.ToString("yyyy-MM-dd") + " clicked=" + clicked +
+                   " picker=" + dpHistory.Value.ToString("yyyy-MM-dd") +
+                   " filter=" + _filterDate.ToString("yyyy-MM-dd") +
+                   " rows=" + grid.Rows.Count + " | " + lblCount.Text +
+                   " | monthPrev=" + m0 + "→" + mPrev + "→" + mBack + " today=" + afterToday;
         }
 
         private void UpdateTodayCount()
