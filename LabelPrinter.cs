@@ -1003,7 +1003,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.0.6";
+        public const string AppVersion = "2.0.7";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1143,10 +1143,11 @@ namespace LabelPrinterApp
     {
         private AppSettings _settings = new AppSettings();
         private string _dataDir;
-        private string _historyPath;
         private string _settingsPath;
-        private HistoryStore _history;
         private readonly List<DeviceRecord> _records = new List<DeviceRecord>();
+        // 本次运行中“新加 / 删除”的记录键（保存时以磁盘为准，只应用本机的增删，避免覆盖外部修改/复制进来的历史）
+        private readonly HashSet<string> _newKeys = new HashSet<string>();
+        private readonly HashSet<string> _deletedKeys = new HashSet<string>();
 
         private TextBox txtScan, txtModel, txtType, txtSN, txtMAC;
         private TextBox txtNetPrinter;
@@ -1210,19 +1211,11 @@ namespace LabelPrinterApp
             StartPosition = FormStartPosition.CenterScreen;
 
             _dataDir = GetDataDir();
-            _historyPath = Path.Combine(_dataDir, "历史记录_" + DateTime.Now.ToString("yyyy-MM-dd") + ".csv");
             _settingsPath = Path.Combine(_dataDir, "设置.ini");
             _settings.Path = _settingsPath;
             _settings.Load();
-            // 首次：若今天的日期文件不存在但存在旧的单文件，则把旧文件更名为今天的日期文件（一次性迁移，避免重复并入每一天）
-            if (!File.Exists(_historyPath))
-            {
-                string legacy = Path.Combine(_dataDir, "历史记录.csv");
-                if (File.Exists(legacy))
-                    try { File.Move(legacy, _historyPath); } catch { }
-            }
-            _history = new HistoryStore(_historyPath);
-            _records.AddRange(_history.Load());
+            // 读取“全部”历史（所有按天文件 + 旧的单文件），重开软件能看到以前所有记录，而不是只读今天那一个文件
+            _records.AddRange(LoadAllHistory());
 
             BuildUi2();
             ApplyUi();
@@ -1605,7 +1598,7 @@ namespace LabelPrinterApp
             btnDel.Click += (s, e) => DeleteSelected();
             gHist.Controls.Add(btnDel);
             var btnClearAll = new RoundedButton { Text = "清空全部", Location = new Point(802, 78), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
-            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
+            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); _newKeys.Clear(); _deletedKeys.Clear(); DeleteAllHistoryFiles(); LoadHistoryGrid(); UpdateTodayCount(); } };
             gHist.Controls.Add(btnClearAll);
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Location = new Point(802, 106), Size = new Size(170, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
@@ -2143,7 +2136,7 @@ namespace LabelPrinterApp
             var btnDel = new RoundedButton { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnDel.Click += (s, e) => DeleteSelected();
             var btnClearAll = new RoundedButton { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
-            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); LoadHistoryGrid(); SaveAll(); } };
+            btnClearAll.Click += (s, e) => { if (MessageBox.Show("确定清空全部历史记录？此操作不可恢复。", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes) { _records.Clear(); _newKeys.Clear(); _deletedKeys.Clear(); DeleteAllHistoryFiles(); LoadHistoryGrid(); UpdateTodayCount(); } };
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
             btnCol.Controls.Add(btnReprint);
@@ -2405,24 +2398,13 @@ namespace LabelPrinterApp
 
         private bool AddRecord(DeviceRecord rec)
         {
-            EnsureCurrentDayFile();
             bool dup = !string.IsNullOrEmpty(rec.SN) && !string.IsNullOrEmpty(rec.MAC) &&
                        _records.Any(r => r.SN == rec.SN && r.MAC == rec.MAC);
             _records.Insert(0, rec);
+            _newKeys.Add(RecKey(rec));
             SaveAll();
             LoadHistoryGrid();
             return dup;
-        }
-
-        private void EnsureCurrentDayFile()
-        {
-            string todayPath = Path.Combine(_dataDir, "历史记录_" + DateTime.Now.ToString("yyyy-MM-dd") + ".csv");
-            if (string.Equals(todayPath, _historyPath, StringComparison.OrdinalIgnoreCase)) return;
-            _historyPath = todayPath;
-            _history = new HistoryStore(_historyPath);
-            _records.Clear();
-            _records.AddRange(_history.Load());
-            LoadHistoryGrid();
         }
 
         private DeviceRecord SelectedRecord()
@@ -2435,6 +2417,7 @@ namespace LabelPrinterApp
         {
             var rec = SelectedRecord();
             if (rec == null) return;
+            _deletedKeys.Add(RecKey(rec));
             _records.Remove(rec);
             SaveAll();
             LoadHistoryGrid();
@@ -2867,14 +2850,125 @@ namespace LabelPrinterApp
         private void SaveAll()
         {
             _settings.Save();
-            _history.Save(_records);
+            SaveHistoryByDay();
+        }
+
+        // 读取全部历史：所有按天文件（历史记录_yyyy-MM-dd.csv）+ 旧的单文件（历史记录.csv），去重后按时间倒序
+        private List<DeviceRecord> LoadAllHistory()
+        {
+            var all = new List<DeviceRecord>();
+            try
+            {
+                if (!Directory.Exists(_dataDir)) return all;
+                var files = new List<string>();
+                foreach (var file in Directory.GetFiles(_dataDir, "历史记录_*.csv"))
+                {
+                    string name = Path.GetFileNameWithoutExtension(file);
+                    string ds = name.Substring(name.LastIndexOf('_') + 1);
+                    DateTime d;
+                    if (DateTime.TryParseExact(ds, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+                        files.Add(file);   // 只读“按天”文件，跳过“历史记录_旧归档.csv”之类
+                }
+                string legacy = Path.Combine(_dataDir, "历史记录.csv");
+                if (File.Exists(legacy)) files.Add(legacy);
+                foreach (var file in files)
+                {
+                    try { all.AddRange(new HistoryStore(file).Load()); } catch { }
+                }
+                // 去重（同一台可能因历史迁移在多个文件里出现）+ 按时间倒序
+                var seen = new HashSet<string>();
+                var uniq = new List<DeviceRecord>();
+                foreach (var r in all)
+                {
+                    string key = r.Time.ToString("yyyy-MM-dd HH:mm:ss") + "|" + (r.SN ?? "") + "|" + (r.MAC ?? "");
+                    if (seen.Add(key)) uniq.Add(r);
+                }
+                uniq.Sort((a, b) => b.Time.CompareTo(a.Time));
+                all = uniq;
+            }
+            catch { }
+            return all;
+        }
+
+        private static string RecKey(DeviceRecord r)
+        {
+            if (r == null) return "";
+            return r.Time.ToString("yyyy-MM-dd HH:mm:ss") + "|" + (r.SN ?? "") + "|" + (r.MAC ?? "");
+        }
+
+        // 按“录入日期”把记录写回各自的按天文件。
+        // 以“磁盘现有内容”为准，只应用本机本次运行的新增/删除，避免把外部修改或复制进来的历史文件覆盖掉。
+        private void SaveHistoryByDay()
+        {
+            try
+            {
+                if (!Directory.Exists(_dataDir)) Directory.CreateDirectory(_dataDir);
+
+                var disk = LoadAllHistory();
+                var seen = new HashSet<string>();
+                var merged = new List<DeviceRecord>();
+                foreach (var r in disk)
+                {
+                    string k = RecKey(r);
+                    if (_deletedKeys.Contains(k)) continue;   // 本机删掉的，跳过
+                    if (seen.Add(k)) merged.Add(r);           // 磁盘内容优先（外部修改/复制进来的以磁盘为准）
+                }
+                foreach (var r in _records)
+                {
+                    string k = RecKey(r);
+                    if (_deletedKeys.Contains(k)) continue;
+                    if (_newKeys.Contains(k) && seen.Add(k)) merged.Add(r);   // 只补本机新增的
+                }
+
+                var groups = new Dictionary<DateTime, List<DeviceRecord>>();
+                foreach (var r in merged)
+                {
+                    DateTime d = r.Time.Date;
+                    if (!groups.ContainsKey(d)) groups[d] = new List<DeviceRecord>();
+                    groups[d].Add(r);
+                }
+                foreach (var kv in groups)
+                    new HistoryStore(Path.Combine(_dataDir, "历史记录_" + kv.Key.ToString("yyyy-MM-dd") + ".csv")).Save(kv.Value);
+
+                // 已经没有任何记录的旧“按天”文件：清空为只剩表头
+                foreach (var file in Directory.GetFiles(_dataDir, "历史记录_*.csv"))
+                {
+                    string name = Path.GetFileNameWithoutExtension(file);
+                    string ds = name.Substring(name.LastIndexOf('_') + 1);
+                    DateTime d;
+                    if (!DateTime.TryParseExact(ds, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
+                    if (!groups.ContainsKey(d.Date))
+                        new HistoryStore(file).Save(new List<DeviceRecord>());
+                }
+            }
+            catch { }
+        }
+
+        // 清空全部历史文件（按天文件 + 旧的单文件）
+        private void DeleteAllHistoryFiles()
+        {
+            try
+            {
+                if (!Directory.Exists(_dataDir)) return;
+                foreach (var file in Directory.GetFiles(_dataDir, "历史记录_*.csv"))
+                {
+                    string name = Path.GetFileNameWithoutExtension(file);
+                    string ds = name.Substring(name.LastIndexOf('_') + 1);
+                    DateTime d;
+                    if (DateTime.TryParseExact(ds, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+                        { try { File.Delete(file); } catch { } }
+                }
+                string legacy = Path.Combine(_dataDir, "历史记录.csv");
+                if (File.Exists(legacy)) { try { File.Delete(legacy); } catch { } }
+            }
+            catch { }
         }
 
         // 嵌入到壳程序后，原 FormClosing 不触发，改由壳在关闭时调用本方法保存
         public void Shutdown()
         {
             try { _settings.Save(); } catch { }
-            try { _history.Save(_records); } catch { }
+            try { SaveHistoryByDay(); } catch { }
             try { if (_refreshTimer != null) _refreshTimer.Stop(); } catch { }
             try { if (_nasTimer != null) _nasTimer.Stop(); } catch { }
         }
