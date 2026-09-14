@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-       public const string AppVersion = "2.1.0";
+      public const string AppVersion = "2.1.1";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
