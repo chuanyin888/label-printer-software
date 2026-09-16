@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-      public const string AppVersion = "2.1.1";
+      public const string AppVersion = "2.2.0";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1271,12 +1271,385 @@ namespace LabelPrinterApp
             return destPath;
         }
 
+        /// <summary>
+        /// 带进度回调的下载（onProgress: 已下载字节 / 总字节；总字节为 0 表示服务器没给长度）。
+        /// 下载更新时用它来显示进度条。
+        /// </summary>
+        public static string Download(string url, string token, string destPath, Action<long, long> onProgress)
+        {
+            if (onProgress == null) return Download(url, token, destPath);
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.UserAgent = "LabelPrinterUpdater";
+                req.Timeout = 60000;
+                req.ReadWriteTimeout = 60000;
+                if (!string.IsNullOrEmpty(token)) req.Headers["Authorization"] = "Bearer " + token;
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var src = resp.GetResponseStream())
+                using (var dst = new FileStream(destPath, FileMode.Create, FileAccess.Write))
+                {
+                    long total = resp.ContentLength;
+                    long done = 0;
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = src.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        dst.Write(buf, 0, n);
+                        done += n;
+                        try { onProgress(done, total); } catch { }
+                    }
+                }
+                return destPath;
+            }
+            catch
+            {
+                // 退回老办法，保证兼容
+                using (var wc = new WebClient())
+                {
+                    wc.Headers["User-Agent"] = "LabelPrinterUpdater";
+                    if (!string.IsNullOrEmpty(token)) wc.Headers["Authorization"] = "Bearer " + token;
+                    wc.DownloadFile(url, destPath);
+                }
+                return destPath;
+            }
+        }
+
         public static void InstallAndRelaunch(string downloadedExe, string currentExe)
         {
             try
             {
                 string cmd = "/c ping -n 2 127.0.0.1 >nul & copy /y \"" + downloadedExe + "\" \"" + currentExe + "\" & start \"\" \"" + currentExe + "\"";
                 System.Diagnostics.Process.Start("cmd.exe", cmd);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>
+    /// 运行环境辅助安装：找 Python、静默装 Python、补装缺失插件。
+    /// 现场电脑第一次用不用手动敲命令：软件会自动装，也可以在「设置 → 辅助安装」里手动点。
+    /// </summary>
+    internal static class PythonEnv
+    {
+        public const string PyVersion = "3.11.9";
+
+        // 国内优先用镜像（快），失败自动换回官方源
+        private static readonly string[] PyUrls = new string[]
+        {
+            "https://mirrors.huaweicloud.com/python/" + PyVersion + "/python-" + PyVersion + "-amd64.exe",
+            "https://www.python.org/ftp/python/" + PyVersion + "/python-" + PyVersion + "-amd64.exe"
+        };
+
+        private static readonly string[] PipIndexes = new string[]
+        {
+            "https://pypi.tuna.tsinghua.edu.cn/simple",   // 清华镜像
+            ""                                            // 空 = pip 默认源
+        };
+
+        // 扫码伴侣需要的插件：{pip 包名, import 用的模块名}
+        public static readonly string[][] Packages = new string[][]
+        {
+            new string[] { "opencv-python", "cv2" },
+            new string[] { "pyzbar", "pyzbar" },
+            new string[] { "pyautogui", "pyautogui" },
+            new string[] { "pygetwindow", "pygetwindow" },
+            new string[] { "zxing-cpp", "zxingcpp" }
+        };
+
+        /// <summary>找 python.exe：先 PATH，再常见安装目录（找不到返回空串）</summary>
+        public static string Find()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("where.exe", "python")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string outp = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(3000);
+                    foreach (var line in (outp ?? "").Split('\n'))
+                    {
+                        string s = line.Trim();
+                        if (s.Length > 4 && s.ToLowerInvariant().EndsWith("python.exe") && File.Exists(s)) return s;
+                    }
+                }
+            }
+            catch { }
+            string lad = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string[] cands = new string[]
+            {
+                Path.Combine(lad, @"Programs\Python\Python311\python.exe"),
+                Path.Combine(lad, @"Programs\Python\Python312\python.exe"),
+                Path.Combine(lad, @"Programs\Python\Python310\python.exe"),
+                @"C:\Python311\python.exe",
+                @"C:\Python312\python.exe",
+                @"C:\Python310\python.exe"
+            };
+            foreach (var c in cands) { try { if (File.Exists(c)) return c; } catch { } }
+            return "";
+        }
+
+        /// <summary>跑一段命令并取回输出（工作目录设成 exe 目录，这样能找到随包带的 zxingcpp）</summary>
+        public static string RunCapture(string exe, string args, int timeoutMs)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(exe, args)
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                    WorkingDirectory = Application.StartupPath
+                };
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                psi.EnvironmentVariables["PYTHONUTF8"] = "1";
+                using (var p = Process.Start(psi))
+                {
+                    string outp = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(Math.Max(2000, timeoutMs))) { try { p.Kill(); } catch { } }
+                    return outp ?? "";
+                }
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>取 Python 版本号（例如 3.11.9），取不到返回空串</summary>
+        public static string Version(string exe)
+        {
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return "";
+            string o = RunCapture(exe, "-c \"import sys;print('.'.join(map(str,sys.version_info[:3])))\"", 10000);
+            return (o ?? "").Trim();
+        }
+
+        /// <summary>返回缺少的插件（pip 包名列表）；都齐了返回空列表</summary>
+        public static List<string> Missing(string exe)
+        {
+            var miss = new List<string>();
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+            {
+                foreach (var p in Packages) miss.Add(p[0]);
+                return miss;
+            }
+            var sb = new StringBuilder();
+            sb.Append("import importlib\nout=[]\n");
+            foreach (var p in Packages)
+                sb.Append("try:\n    importlib.import_module('" + p[1] + "')\nexcept Exception:\n    out.append('" + p[0] + "')\n");
+            sb.Append("print(','.join(out))\n");
+            string tmp = Path.Combine(Path.GetTempPath(), "lpenv_check.py");
+            try
+            {
+                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
+                string o = RunCapture(exe, "\"" + tmp + "\"", 30000);
+                foreach (var s in (o ?? "").Trim().Split(','))
+                {
+                    string t = s.Trim();
+                    if (t.Length > 0 && !miss.Contains(t)) miss.Add(t);
+                }
+            }
+            catch { }
+            try { File.Delete(tmp); } catch { }
+            return miss;
+        }
+
+        /// <summary>下载并静默安装 Python（不弹窗口）。返回装好的 python.exe 路径，失败返回空串。</summary>
+        public static string InstallPython(Action<string> log, Action<long, long> progress)
+        {
+            string setup = Path.Combine(Path.GetTempPath(), "python-" + PyVersion + "-amd64.exe");
+            bool got = false;
+            for (int i = 0; i < PyUrls.Length && !got; i++)
+            {
+                try
+                {
+                    if (log != null) log("正在下载 Python " + PyVersion + " 安装包（" + (i == 0 ? "华为云镜像" : "python.org 官方源") + "）…");
+                    Updater.Download(PyUrls[i], "", setup, progress);
+                    got = File.Exists(setup) && new FileInfo(setup).Length > 5000000;
+                    if (!got && log != null) log("这个源没下完整，换下一个源重试…");
+                }
+                catch (Exception ex)
+                {
+                    if (log != null) log("下载失败：" + ex.Message);
+                }
+            }
+            if (!got)
+            {
+                if (log != null) log("Python 安装包没下载成功（请检查网络后重试）。");
+                return "";
+            }
+            try
+            {
+                if (log != null) log("正在静默安装（约 1~3 分钟，期间不要关软件）…");
+                var psi = new ProcessStartInfo(setup,
+                    "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_test=0 Include_launcher=1 SimpleInstall=1")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi)) { p.WaitForExit(); }
+            }
+            catch (Exception ex)
+            {
+                if (log != null) log("安装失败：" + ex.Message);
+                return "";
+            }
+            System.Threading.Thread.Sleep(1500);
+            string py = Find();
+            if (log != null) log(py.Length > 0 ? ("Python 已就绪：" + py) : "没找到刚装的 Python（可能要重开一次软件）。");
+            return py;
+        }
+
+        /// <summary>安装缺少的插件（先走清华镜像，失败再走默认源）。返回是否装齐。</summary>
+        public static bool InstallPackages(string exe, List<string> pkgs, Action<string> log)
+        {
+            if (pkgs == null || pkgs.Count == 0)
+            {
+                if (log != null) log("插件都齐了，不用装。");
+                return true;
+            }
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+            {
+                if (log != null) log("没有 Python，装不了插件（请先装 Python）。");
+                return false;
+            }
+            var todo = new List<string>(pkgs);
+            for (int i = 0; i < PipIndexes.Length; i++)
+            {
+                string list = string.Join(" ", todo.ToArray());
+                try
+                {
+                    string args = "-m pip install --disable-pip-version-check " + list;
+                    if (PipIndexes[i].Length > 0) args += " -i " + PipIndexes[i];
+                    if (log != null) log("正在安装插件：" + list + "（" + (PipIndexes[i].Length > 0 ? "清华镜像" : "官方源") + "）…");
+                    var psi = new ProcessStartInfo(exe, args)
+                    {
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = new UTF8Encoding(false),
+                        WorkingDirectory = Application.StartupPath
+                    };
+                    psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                    psi.EnvironmentVariables["PYTHONUTF8"] = "1";
+                    using (var p = Process.Start(psi))
+                    {
+                        string o = p.StandardOutput.ReadToEnd();
+                        if (!p.WaitForExit(900000)) { try { p.Kill(); } catch { } }
+                        if (p.ExitCode == 0)
+                        {
+                            var left = Missing(exe);
+                            if (left.Count == 0)
+                            {
+                                if (log != null) log("插件安装完成 ✅");
+                                return true;
+                            }
+                            todo = left;
+                            if (log != null) log("装完还缺：" + string.Join("、", left.ToArray()));
+                        }
+                        else if (log != null)
+                        {
+                            string tail = (o ?? "").Trim();
+                            if (tail.Length > 220) tail = tail.Substring(tail.Length - 220);
+                            log("pip 返回失败：" + tail.Replace("\r", "").Replace("\n", " "));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (log != null) log("安装插件出错：" + ex.Message);
+                }
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 下载进度对话框：下载更新时显示进度条 + 百分比（以前只显示"正在更新…"，看不到进度）。
+    /// </summary>
+    internal class UpdateProgressForm : Form
+    {
+        private ProgressBar _bar;
+        private Label _lbl;
+        private Label _sub;
+
+        public UpdateProgressForm(string title)
+        {
+            Text = "正在下载更新";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(460, 140);
+            Font = new Font("Microsoft YaHei", 9F);
+            BackColor = Color.White;
+
+            var wrap = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(16, 12, 16, 12) };
+            wrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            wrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            wrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _lbl = new Label { Text = title, AutoSize = true, Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold), ForeColor = Color.FromArgb(30, 41, 59), Margin = new Padding(0, 0, 0, 10) };
+            _bar = new ProgressBar { Dock = DockStyle.Fill, Height = 24, Minimum = 0, Maximum = 100, Style = ProgressBarStyle.Continuous, Margin = new Padding(0, 0, 0, 8) };
+            _sub = new Label { Text = "准备中…", AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139) };
+            wrap.Controls.Add(_lbl, 0, 0);
+            wrap.Controls.Add(_bar, 0, 1);
+            wrap.Controls.Add(_sub, 0, 2);
+            Controls.Add(wrap);
+            FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing && !_done) e.Cancel = true; };
+        }
+
+        private bool _done;
+
+        /// <summary>下载进度回调（可跨线程调用）</summary>
+        public void Report(long done, long total)
+        {
+            try
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) { try { BeginInvoke((Action)delegate { Report(done, total); }); } catch { } return; }
+                if (total > 0)
+                {
+                    int pct = (int)Math.Min(100L, done * 100L / Math.Max(1L, total));
+                    _bar.Style = ProgressBarStyle.Continuous;
+                    _bar.Value = Math.Max(0, Math.Min(100, pct));
+                    _sub.Text = string.Format("已下载 {0:N1} MB / {1:N1} MB（{2}%）", done / 1048576.0, total / 1048576.0, pct);
+                }
+                else
+                {
+                    _bar.Style = ProgressBarStyle.Marquee;
+                    _sub.Text = string.Format("已下载 {0:N1} MB（服务器未提供总大小）", done / 1048576.0);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>设置副标题（例如"正在替换程序并重启…"）</summary>
+        public void SetStatus(string text)
+        {
+            try
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) { try { BeginInvoke((Action)delegate { SetStatus(text); }); } catch { } return; }
+                _sub.Text = text;
+            }
+            catch { }
+        }
+
+        /// <summary>下载结束（成功或失败）时调用，允许关闭对话框</summary>
+        public void Finish()
+        {
+            try
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) { try { BeginInvoke((Action)delegate { Finish(); }); } catch { } return; }
+                _done = true;
+                DialogResult = DialogResult.OK;
+                Close();
             }
             catch { }
         }
@@ -2266,7 +2639,21 @@ namespace LabelPrinterApp
             try
             {
                 string tmp = Path.Combine(Path.GetTempPath(), "label_update_" + Guid.NewGuid().ToString("N") + ".exe");
-                Updater.Download(downloadUrl, _settings.UpdateToken, tmp);
+                // 带进度条下载（以前只有一行"正在更新…"，看不到进度）
+                Exception err = null;
+                using (var pf = new UpdateProgressForm("正在下载 v" + newVersion + "…"))
+                {
+                    var th = new System.Threading.Thread(delegate()
+                    {
+                        try { Updater.Download(downloadUrl, _settings.UpdateToken, tmp, delegate(long got, long tot) { pf.Report(got, tot); }); }
+                        catch (Exception ex) { err = ex; }
+                        finally { try { pf.Finish(); } catch { } }
+                    });
+                    th.IsBackground = true;
+                    th.Start();
+                    pf.ShowDialog(this);
+                }
+                if (err != null) throw err;
                 SetStatus("正在更新到 v" + newVersion + "，程序将自动重启…", Color.DarkOrange);
                 Application.DoEvents();
                 System.Threading.Thread.Sleep(300);
@@ -3253,6 +3640,12 @@ namespace LabelPrinterApp
                 }
             }
             catch (Exception ex) { SetStatus("启动扫码伴侣出错：" + ex.Message, Color.Red); }
+        }
+
+        /// <summary>把一行提示显示到「扫码伴侣日志」面板（辅助安装/环境检查的进度也走这里，工人看得见）</summary>
+        internal void ShowEnvLogLine(string line)
+        {
+            OnCompanionLine("[环境] " + line);
         }
 
         // 扫码伴侣的一行日志 → 追加到"扫码伴侣日志"面板（自动滚到底）
