@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-      public const string AppVersion = "2.3.0";
+      public const string AppVersion = "2.3.1";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1320,8 +1320,41 @@ namespace LabelPrinterApp
         {
             try
             {
-                string cmd = "/c ping -n 2 127.0.0.1 >nul & copy /y \"" + downloadedExe + "\" \"" + currentExe + "\" & start \"\" \"" + currentExe + "\"";
-                System.Diagnostics.Process.Start("cmd.exe", cmd);
+                // 老写法只等 1 秒就 copy，慢一点的电脑/文件被占用时会静默失败（版本一直升不上去）。
+                // 改成：写一个 PowerShell 脚本 → 等本进程退出 → 最多重试 30 次复制 → 校验大小 → 重启，
+                // 全过程写进同目录「更新日志.txt」，失败会弹窗告诉现场（不再无声无息）。
+                string dir = Path.GetDirectoryName(currentExe);
+                string log = Path.Combine(string.IsNullOrEmpty(dir) ? "." : dir, "更新日志.txt");
+                string ps1 = Path.Combine(Path.GetTempPath(), "label_update_" + Guid.NewGuid().ToString("N") + ".ps1");
+                int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                string sSrc = (downloadedExe ?? "").Replace("'", "''");
+                string sDst = (currentExe ?? "").Replace("'", "''");
+                string sLog = log.Replace("'", "''");
+                var sb = new StringBuilder();
+                sb.AppendLine("$ErrorActionPreference='Continue'");
+                sb.AppendLine("Add-Type -AssemblyName System.Windows.Forms | Out-Null");
+                sb.AppendLine("$src='" + sSrc + "'");
+                sb.AppendLine("$dst='" + sDst + "'");
+                sb.AppendLine("$logFile='" + sLog + "'");
+                sb.AppendLine("$oldPid=" + pid);
+                sb.AppendLine("function Say($m){ Write-Host $m; try{ Add-Content -LiteralPath $logFile -Value (\"[{0}] {1}\" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) -Encoding UTF8 }catch{} }");
+                sb.AppendLine("function Tip($m){ if($env:LP_NO_POPUP -eq '1'){ Write-Host ('[提示] '+$m); return }; try{ [System.Windows.Forms.MessageBox]::Show($m,'更新','OK','Information') | Out-Null }catch{ Write-Host $m } }");
+                sb.AppendLine("Say '等待程序退出…'");
+                sb.AppendLine("for($i=0;$i -lt 120;$i++){ if(-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)){ break }; Start-Sleep -Milliseconds 500 }");
+                sb.AppendLine("Say '开始替换程序文件…'");
+                sb.AppendLine("$ok=$false");
+                sb.AppendLine("for($i=1;$i -le 30;$i++){ try{ Copy-Item -LiteralPath $src -Destination $dst -Force; $ok=$true; break }catch{ Say ('第 '+$i+' 次替换失败：'+$_.Exception.Message); Start-Sleep -Seconds 1 } }");
+                sb.AppendLine("if(-not $ok){ Say '替换失败（被占用或没有写入权限）'; Tip ('更新失败：程序文件被占用或没有写入权限。' + [char]10 + [char]10 + '可以手动把：' + [char]10 + $src + [char]10 + '覆盖到：' + [char]10 + $dst); exit 1 }");
+                sb.AppendLine("$n1=(Get-Item -LiteralPath $src).Length; $n2=(Get-Item -LiteralPath $dst).Length");
+                sb.AppendLine("if($n1 -ne $n2){ Say ('大小不一致：'+$n2+' / '+$n1); Tip ('更新后文件大小不一致，可能没写成功。' + [char]10 + '请手动把 ' + $src + ' 覆盖到 ' + $dst); exit 1 }");
+                sb.AppendLine("Say '替换成功，正在重新打开程序…'");
+                sb.AppendLine("if($env:LP_UPDATE_NOSTART -eq '1'){ Say '（跳过自动重启：测试模式）' } else { try{ Start-Process -FilePath $dst }catch{ Say ('启动失败：'+$_.Exception.Message) } }");
+                File.WriteAllText(ps1, sb.ToString(), new UTF8Encoding(true));
+                var psi = new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + ps1 + "\"");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                System.Diagnostics.Process.Start(psi);
             }
             catch { }
         }
