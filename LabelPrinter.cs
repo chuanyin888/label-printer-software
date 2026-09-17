@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-      public const string AppVersion = "2.2.1";
+      public const string AppVersion = "2.3.0";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -1652,6 +1652,149 @@ namespace LabelPrinterApp
                 Close();
             }
             catch { }
+        }
+    }
+
+    /// <summary>
+    /// 「扫码删除」对话框：扫一个 SN/MAC 就删掉历史记录里对应的那一条。
+    /// 扫码框下面显示"XXXX 已删除"，再下面的核对区同样累积一份，扫完可以整体核对。
+    /// </summary>
+    internal class ScanDeleteForm : Form
+    {
+        private readonly MainForm _owner;
+        private TextBox _txtCode;
+        private TextBox _listSmall;
+        private TextBox _listBig;
+        private Label _lblStat;
+        private int _deleted;
+        private int _notFound;
+        private readonly HashSet<string> _scanned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public ScanDeleteForm(MainForm owner)
+        {
+            _owner = owner;
+            Text = "扫码删除（扫一个删一个）";
+            ClientSize = new Size(640, 700);
+            MinimumSize = new Size(540, 560);
+            StartPosition = FormStartPosition.CenterParent;
+            Font = new Font("Microsoft YaHei", 9F);
+            BackColor = Color.White;
+            MaximizeBox = false;
+            MinimizeBox = false;
+
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(12) };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 说明
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 扫码行
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 小标题
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));   // 已删除小列表
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 大标题
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 核对区
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 底部
+
+            var tip = new Label
+            {
+                AutoSize = true,
+                MaximumSize = new Size(600, 0),
+                ForeColor = Color.FromArgb(71, 85, 105),
+                Text = "扫一个 SN 或 MAC，就会把「历史记录」里对应的那一条删掉；下面两块会同时记下来，扫完可以对照核对。"
+            };
+            root.Controls.Add(tip, 0, 0);
+
+            var scanRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, AutoSize = true, Margin = new Padding(0, 8, 0, 0) };
+            scanRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            scanRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            scanRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            scanRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var lblScan = new Label { Text = "扫码录入框（扫完自动删除，不用点按钮）", AutoSize = true, ForeColor = Color.FromArgb(15, 118, 110), Margin = new Padding(0, 0, 0, 4) };
+            scanRow.Controls.Add(lblScan, 0, 0);
+            scanRow.SetColumnSpan(lblScan, 2);
+            _txtCode = new TextBox { Dock = DockStyle.Fill, Font = new Font("Consolas", 13F), Margin = new Padding(0, 0, 8, 0) };
+            _txtCode.KeyDown += OnCodeKeyDown;
+            scanRow.Controls.Add(_txtCode, 0, 1);
+            var btnDel = new Button { Text = "删除", Width = 96, Height = 30, FlatStyle = FlatStyle.Flat, Margin = new Padding(0) };
+            btnDel.Click += (s, e) => ProcessCode();
+            scanRow.Controls.Add(btnDel, 1, 1);
+            root.Controls.Add(scanRow, 0, 1);
+
+            root.Controls.Add(new Label { Text = "已删除（扫一个显示一条）：", AutoSize = true, ForeColor = Color.FromArgb(60, 70, 84), Margin = new Padding(0, 10, 0, 4) }, 0, 2);
+            _listSmall = new TextBox
+            {
+                Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical,
+                Font = new Font("Microsoft YaHei", 10F), BackColor = Color.FromArgb(248, 250, 252), BorderStyle = BorderStyle.FixedSingle
+            };
+            root.Controls.Add(_listSmall, 0, 3);
+
+            root.Controls.Add(new Label { Text = "核对区（全部记录，扫完一次性核对）：", AutoSize = true, ForeColor = Color.FromArgb(60, 70, 84), Margin = new Padding(0, 10, 0, 4) }, 0, 4);
+            _listBig = new TextBox
+            {
+                Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical,
+                Font = new Font("Consolas", 10F), BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle
+            };
+            root.Controls.Add(_listBig, 0, 5);
+
+            var foot = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, AutoSize = true, Margin = new Padding(0, 10, 0, 0) };
+            foot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            foot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _lblStat = new Label { Text = "已删除 0 条", AutoSize = true, Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold), ForeColor = Color.FromArgb(15, 118, 110), Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 0, 0) };
+            foot.Controls.Add(_lblStat, 0, 0);
+            var btnClose = new Button { Text = "关闭", Width = 110, Height = 30, FlatStyle = FlatStyle.Flat, Margin = new Padding(0) };
+            btnClose.Click += (s, e) => Close();
+            foot.Controls.Add(btnClose, 1, 0);
+            root.Controls.Add(foot, 0, 6);
+            Controls.Add(root);
+
+            Shown += (s, e) => _txtCode.Focus();
+        }
+
+        private void OnCodeKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                ProcessCode();
+            }
+        }
+
+        private void ProcessCode()
+        {
+            string code = (_txtCode.Text ?? "").Trim();
+            _txtCode.Clear();
+            if (code.Length == 0) { _txtCode.Focus(); return; }
+            if (_scanned.Contains(code))
+            {
+                Append("！ " + code + " 本次已经扫过了", true);
+                _txtCode.Focus();
+                return;
+            }
+            _scanned.Add(code);
+            string info = _owner.DeleteHistoryByCode(code);
+            if (info == null)
+            {
+                _notFound++;
+                Append("× " + code + " 未找到（历史记录里没有这个条码）", true);
+            }
+            else
+            {
+                _deleted++;
+                Append("√ " + code + " 已删除", true);
+                _listBig.AppendText("        " + info + "\r\n");
+            }
+            _lblStat.Text = "已删除 " + _deleted + " 条" + (_notFound > 0 ? ("　未找到 " + _notFound + " 条") : "");
+            try { _listBig.SelectionStart = _listBig.TextLength; _listBig.ScrollToCaret(); } catch { }
+            _txtCode.Focus();
+        }
+
+        /// <summary>同时写入"已删除"小列表和下面的核对区</summary>
+        private void Append(string line, bool alsoBig)
+        {
+            _listSmall.AppendText(line + "\r\n");
+            try { _listSmall.SelectionStart = _listSmall.TextLength; _listSmall.ScrollToCaret(); } catch { }
+            if (alsoBig)
+            {
+                _listBig.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + line + "\r\n");
+                try { _listBig.SelectionStart = _listBig.TextLength; _listBig.ScrollToCaret(); } catch { }
+            }
         }
     }
 
@@ -3482,12 +3625,16 @@ namespace LabelPrinterApp
             btnReprint.Click += (s, e) => { var rec = SelectedRecord(); if (rec != null) Reprint(rec); };
             var btnDel = new RoundedButton { Text = "删除选中", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnDel.Click += (s, e) => DeleteSelected();
+            // 扫码删除：扫一个 SN/MAC 就删一条历史，边扫边显示"XXX已删除"，扫完可以核对
+            var btnScanDel = new RoundedButton { Text = "扫码删除", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
+            btnScanDel.Click += (s, e) => { using (var dlg = new ScanDeleteForm(this)) dlg.ShowDialog(this); };
             var btnClearAll = new RoundedButton { Text = "清空全部", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnClearAll.Click += (s, e) => ClearAllHistory();
             var btnFolder = new RoundedButton { Text = "打开数据文件夹", Width = 170, Height = 22, Margin = new Padding(0, 0, 0, 1) };
             btnFolder.Click += (s, e) => { try { System.Diagnostics.Process.Start("explorer.exe", _dataDir); } catch { } };
             btnCol.Controls.Add(btnReprint);
             btnCol.Controls.Add(btnDel);
+            btnCol.Controls.Add(btnScanDel);
             btnCol.Controls.Add(btnClearAll);
             btnCol.Controls.Add(btnFolder);
             t.Controls.Add(btnCol, 1, 1);
@@ -4474,6 +4621,58 @@ namespace LabelPrinterApp
             _records.Remove(rec);
             SaveAll();
             LoadHistoryGrid();
+        }
+
+        // 仅供开发自测：塞一条历史记录（验证「扫码删除」用；在测试目录里跑，不会碰正式数据）
+        public void TestAddHistory(string sn, string mac, string model)
+        {
+            try
+            {
+                var r = new DeviceRecord();
+                r.Time = DateTime.Now;
+                r.Model = model;
+                r.Type = "GPON";
+                r.SN = sn;
+                r.MAC = mac;
+                _records.Add(r);
+                _newKeys.Add(RecKey(r));   // 让 SaveHistoryByDay 认这是"本机新增"，才会写进 CSV
+                SaveAll();
+                LoadHistoryGrid();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 「扫码删除」用：按 SN 或 MAC 精确匹配，删掉一条历史记录。
+        /// 返回 null=历史里没有这条；否则返回被删记录的摘要文字（供对话框显示"XXXX 已删除"）。
+        /// </summary>
+        public string DeleteHistoryByCode(string code)
+        {
+            try
+            {
+                string c = (code ?? "").Trim();
+                if (c.Length == 0) return null;
+                DeviceRecord hit = null;
+                foreach (var r in _records)
+                {
+                    if (string.Equals((r.SN ?? "").Trim(), c, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals((r.MAC ?? "").Trim(), c, StringComparison.OrdinalIgnoreCase))
+                    {
+                        hit = r;
+                        break;
+                    }
+                }
+                if (hit == null) return null;
+                _deletedKeys.Add(RecKey(hit));
+                AddTombstone(hit);          // 记"这条被删了"，避免 NAS 同步又合并回来
+                _records.Remove(hit);
+                SaveAll();
+                LoadHistoryGrid();
+                string which = string.Equals((hit.SN ?? "").Trim(), c, StringComparison.OrdinalIgnoreCase) ? "SN" : "MAC";
+                return c + "（" + which + "，" + (hit.Model ?? "-") + "，" +
+                       hit.Time.ToString("yyyy-MM-dd HH:mm") + " 录入）";
+            }
+            catch { return null; }
         }
 
         private void LoadHistoryGrid()
