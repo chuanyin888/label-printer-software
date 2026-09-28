@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.4";
+        public const string AppVersion = "2.3.5";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -4649,11 +4649,63 @@ namespace LabelPrinterApp
         {
             var rec = SelectedRecord();
             if (rec == null) return;
+
+            // 防连点：600 毫秒内又点一次只当一次（避免手快点快了连删好几条）
+            if ((DateTime.Now - _lastDeleteAt).TotalMilliseconds < 600) return;
+
+            // 删除确认（默认按钮是「否」，防止回车/误点直接删掉）
+            bool ok;
+            if (TestConfirmOverride != null) ok = TestConfirmOverride(rec);
+            else
+            {
+                string info = "时间：" + rec.Time.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" +
+                              "型号：" + (rec.Model ?? "") + "　类型：" + (rec.Type ?? "") + "\r\n" +
+                              "SN：" + (rec.SN ?? "") + "\r\n" +
+                              "MAC：" + (rec.MAC ?? "");
+                ok = MessageBox.Show("确定删除这条历史记录吗？\r\n\r\n" + info +
+                                     "\r\n\r\n删除后不可恢复（NAS 同步也不会再合并回来）。",
+                                     "删除确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                                     MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+            }
+            if (!ok) return;
+
+            _lastDeleteAt = DateTime.Now;
             _deletedKeys.Add(RecKey(rec));
             AddTombstone(rec);          // 记下“这条被删了”，避免下次 NAS 同步又合并回来
             _records.Remove(rec);
             SaveAll();
             LoadHistoryGrid();
+            try { grid.ClearSelection(); } catch { }   // 删完不自动选中下一行，避免连点接着删
+        }
+
+        private DateTime _lastDeleteAt = DateTime.MinValue;
+        internal Func<DeviceRecord, bool> TestConfirmOverride;   // 自测用：替掉确认弹窗
+
+        // 自测：走一遍「删除选中」（confirm=是否点“是”）；跳过防连点，专测确认逻辑
+        internal string TestDeleteSelected(bool confirm)
+        {
+            if (grid == null) return "没有历史列表";
+            if (grid.Rows.Count > 0) { grid.ClearSelection(); grid.Rows[0].Selected = true; }
+            var old = TestConfirmOverride;
+            TestConfirmOverride = delegate(DeviceRecord r) { return confirm; };
+            _lastDeleteAt = DateTime.MinValue;              // 不受防连点影响
+            int before = _records.Count;
+            try { DeleteSelected(); } finally { TestConfirmOverride = old; }
+            return before + "," + _records.Count + "," + (SelectedRecord() == null ? "0" : "1");
+        }
+
+        // 自测：刚删完立刻又点一次（应被 600ms 防连点拦住）
+        internal string TestDeleteTooFast()
+        {
+            if (grid == null || grid.Rows.Count == 0) return "没有历史列表";
+            grid.ClearSelection();
+            grid.Rows[0].Selected = true;
+            var old = TestConfirmOverride;
+            TestConfirmOverride = delegate(DeviceRecord r) { return true; };
+            _lastDeleteAt = DateTime.Now;                   // 模拟“刚刚删过”
+            int before = _records.Count;
+            try { DeleteSelected(); } finally { TestConfirmOverride = old; }
+            return before + "," + _records.Count;
         }
 
         // 仅供开发自测：塞一条历史记录（验证「扫码删除」用；在测试目录里跑，不会碰正式数据）
