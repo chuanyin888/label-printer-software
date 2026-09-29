@@ -1146,7 +1146,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.5";
+        public const string AppVersion = "2.3.6";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2181,7 +2181,7 @@ namespace LabelPrinterApp
 
         internal int Pid { get { try { return Running ? _proc.Id : 0; } catch { return 0; } } }
 
-        private static string FindPython()
+        internal static string FindPython()
         {
             // 1) PATH 里的 python
             try
@@ -2239,6 +2239,7 @@ namespace LabelPrinterApp
                     LastError = err;
                     return false;
                 }
+                ShellApp.ScannerFocusSettings.Load();     // 每次启动前都读一遍：设置里勾了固定对焦就带上参数
                 try { File.WriteAllText(_cmdFile, "", new UTF8Encoding(false)); } catch { }   // 清掉旧命令
                 var psi = new ProcessStartInfo();
                 psi.FileName = py;
@@ -2246,7 +2247,8 @@ namespace LabelPrinterApp
                              + " --control \"" + _cmdFile + "\""
                              + " --start-paused"
                              + " --parent-pid " + Process.GetCurrentProcess().Id.ToString()
-                             + " --title \"光猫扫码伴侣（一体化工具调用）\"";
+                             + " --title \"光猫扫码伴侣（一体化工具调用）\""
+                             + ShellApp.ScannerFocusSettings.ExtraArgs();   // 设置里勾了"固定对焦"就带上 --focus xx --no-adapt
                 psi.WorkingDirectory = Path.GetDirectoryName(_script);
                 psi.UseShellExecute = false;
                 // 不要控制台窗口：日志直接读进工具里显示（现代 Windows 的控制台属于 conhost，
@@ -3798,6 +3800,22 @@ namespace LabelPrinterApp
             catch { }
         }
 
+        /// <summary>先把扫码伴侣停掉（让出摄像头，测对焦的时候用）</summary>
+        internal void StopCompanion()
+        {
+            try { if (_companion != null) { _companion.Kill(); } } catch { }
+            try { _companion = null; } catch { }
+            try { UpdateScannerUi(); } catch { }
+        }
+
+        /// <summary>按当前设置重新拉起扫码伴侣（设置改完不用关工具）</summary>
+        internal void RestartCompanion()
+        {
+            StopCompanion();
+            try { System.Threading.Thread.Sleep(500); } catch { }
+            EnsureCompanion();
+        }
+
         /// <summary>拉起扫码伴侣（第一次会把窗口藏起来、处于暂停状态）</summary>
         internal void EnsureCompanion()
         {
@@ -4231,12 +4249,17 @@ namespace LabelPrinterApp
             _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
             if (clearAfter)
             {
-                // 保留最后打印内容在输入框与预览，只重置扫描状态，便于下一台扫码覆盖
+                // 打印成功后：左边「当前设备数据」清空（方便直接扫下一台），
+                // 但标签预览保留刚才打印的这一台（_previewKeep）
+                _previewKeep = CloneRecord(rec);
+                ClearInputs();          // 清空输入框 + 刷新预览（预览用的是 _previewKeep）
                 SetStatus(testMode
-                    ? (dup ? "测试模式：已模拟打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "测试模式：已模拟打印并保存，等待下一台…（已保留最后预览）")
-                    : (dup ? "已打印并保存（注意：该设备之前已录入过）·已保留最后预览" : "已打印并保存，等待下一台…（已保留最后预览）"), dup ? Color.Red : (testMode ? Color.DarkOrange : Color.SeaGreen));
+                    ? (dup ? "测试模式：已模拟打印并保存（该设备之前已录入过）·数据已清空、预览保留这一台"
+                           : "测试模式：已模拟打印并保存，等待下一台…（数据已清空、预览保留这一台）")
+                    : (dup ? "已打印并保存（该设备之前已录入过）·数据已清空、预览保留这一台"
+                           : "已打印并保存，等待下一台…（数据已清空、预览保留这一台）"),
+                    dup ? Color.Red : (testMode ? Color.DarkOrange : Color.SeaGreen));
                 txtScan.Focus();
-                UpdatePreview();
             }
             else
             {
@@ -4269,6 +4292,19 @@ namespace LabelPrinterApp
                 }
                 if (old == null) return false;                 // 历史里没有 → 正常录入
 
+                // 顺手把下面「历史记录」切到那条记录的日期并选中它 —— 多半不是今天，工人找不到才来问
+                try
+                {
+                    _searchText = "";
+                    if (txtSearch != null && txtSearch.Text.Length > 0) txtSearch.Text = "";
+                    DateTime d0 = old.Time.Date;
+                    _filterDate = d0;
+                    if (dpHistory != null && dpHistory.Value.Date != d0) dpHistory.Value = d0;   // 会顺带刷新一次
+                    LoadHistoryGrid();
+                    SelectHistoryRow(old);
+                }
+                catch { }
+
                 try { Console.Beep(600, 400); } catch { }
                 string msg = "重复录入！这台设备之前已经录入过了，本次不会打印、也不会保存。\n\n"
                     + "型号：" + (string.IsNullOrEmpty(old.Model) ? "-" : old.Model) + "\n"
@@ -4276,6 +4312,7 @@ namespace LabelPrinterApp
                     + "SN：" + (string.IsNullOrEmpty(old.SN) ? "-" : old.SN) + "\n"
                     + "MAC：" + (string.IsNullOrEmpty(old.MAC) ? "-" : old.MAC) + "\n"
                     + "上次录入：" + old.Time.ToString("yyyy-MM-dd HH:mm:ss") + "\n\n"
+                    + "（下面「历史记录」已自动切到 " + old.Time.ToString("MM-dd") + " 那天，并选中这一条）\n"
                     + "如果只是要补打一张标签：请在下面「历史记录」里选中这一条，点「重印选中」。";
                 // 自动化自测时不弹模态框（否则自测会卡住）；正常运行时（哪怕勾了测试模式）都要弹出来提醒工人
                 if (!ShellApp.Globals.TestHarness)
@@ -4284,11 +4321,57 @@ namespace LabelPrinterApp
                     catch { }
                 }
                 SetStatus("重复录入：" + (string.IsNullOrEmpty(rec.SN) ? rec.MAC : rec.SN)
-                    + "（已在 " + old.Time.ToString("MM-dd HH:mm") + " 录入过，跳过）", Color.Red);
+                    + "（已在 " + old.Time.ToString("MM-dd HH:mm") + " 录入过，跳过；已切到那天并选中）", Color.Red);
                 try { if (txtScan != null) { txtScan.Focus(); ActiveControl = txtScan; } } catch { }
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>在下面「历史记录」列表里选中并滚动到某一条（SN 或 MAC 相同的那条）</summary>
+        private void SelectHistoryRow(DeviceRecord target)
+        {
+            try
+            {
+                if (target == null || grid == null) return;
+                grid.ClearSelection();
+                foreach (DataGridViewRow row in grid.Rows)
+                {
+                    var r = row.Tag as DeviceRecord;
+                    if (r == null) continue;
+                    bool same = (r == target)
+                        || (!string.IsNullOrEmpty(r.SN) && !string.IsNullOrEmpty(target.SN) &&
+                            string.Equals(r.SN.Trim(), target.SN.Trim(), StringComparison.OrdinalIgnoreCase))
+                        || (!string.IsNullOrEmpty(r.MAC) && !string.IsNullOrEmpty(target.MAC) &&
+                            string.Equals(r.MAC.Trim(), target.MAC.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (!same) continue;
+                    row.Selected = true;
+                    try { grid.CurrentCell = row.Cells[0]; } catch { }
+                    try { grid.FirstDisplayedScrollingRowIndex = row.Index; } catch { }
+                    break;
+                }
+            }
+            catch { }
+        }
+
+        // 自测：模拟扫码识别到一台，走一遍重复校验，看有没有自动切到那一天并选中
+        internal string TestDupNavigate(string sn, string mac)
+        {
+            try
+            {
+                var rec = new DeviceRecord();
+                rec.Time = DateTime.Now;
+                rec.Model = "TEST-MODEL";
+                rec.Type = "GPON";
+                rec.SN = sn;
+                rec.MAC = mac;
+                bool dup = CheckDuplicate(rec);
+                int rows = 0, sel = 0;
+                try { rows = grid.Rows.Count; sel = grid.SelectedRows.Count; } catch { }
+                return "检出重复=" + dup + " 过滤日期=" + _filterDate.ToString("yyyy-MM-dd") +
+                       " 列表行数=" + rows + " 选中行数=" + sel;
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
         // 没有二维码时：用 SN 去历史记录里反查“型号 / 类型”（先精确后前缀），典型现场是同一批型号
@@ -4622,6 +4705,33 @@ namespace LabelPrinterApp
             };
         }
 
+        // 打印完把输入框清空后，预览继续显示“最后打印的那一台”
+        private DeviceRecord _previewKeep;
+
+        private DeviceRecord CloneRecord(DeviceRecord r)
+        {
+            if (r == null) return null;
+            return new DeviceRecord
+            {
+                Time = r.Time,
+                Model = r.Model,
+                Type = r.Type,
+                SN = r.SN,
+                MAC = r.MAC,
+                RawQR = r.RawQR,
+                PrintTime = r.PrintTime
+            };
+        }
+
+        /// <summary>预览用哪一台：输入框里有 SN/MAC 就用输入框的，都空了就继续显示最后打印的那台</summary>
+        private DeviceRecord PreviewRecord()
+        {
+            var cur = CurrentRecord();
+            bool empty = string.IsNullOrWhiteSpace(cur.SN) && string.IsNullOrWhiteSpace(cur.MAC);
+            if (empty && _previewKeep != null) return _previewKeep;
+            return cur;
+        }
+
         private bool AddRecord(DeviceRecord rec)
         {
             bool dup = !string.IsNullOrEmpty(rec.SN) && !string.IsNullOrEmpty(rec.MAC) &&
@@ -4680,6 +4790,29 @@ namespace LabelPrinterApp
 
         private DateTime _lastDeleteAt = DateTime.MinValue;
         internal Func<DeviceRecord, bool> TestConfirmOverride;   // 自测用：替掉确认弹窗
+
+        // 自测：填一台 → 走一遍打印（测试模式，不真打）→ 看输入框有没有清空、预览有没有保留
+        internal string TestPrintAndClear(string model, string type, string sn, string mac)
+        {
+            try
+            {
+                bool oldTest = ShellApp.Globals.TestMode;
+                ShellApp.Globals.TestMode = true;
+                txtModel.Text = model;
+                txtType.Text = type;
+                txtSN.Text = sn;
+                txtMAC.Text = mac;
+                SaveAndPrint(true);
+                string fields = "型号=" + txtModel.Text.Trim() + " 类型=" + txtType.Text.Trim() +
+                                " SN=" + txtSN.Text.Trim() + " MAC=" + txtMAC.Text.Trim();
+                var pv = PreviewRecord();
+                string prev = pv == null ? "(空)" : (pv.SN + "/" + pv.MAC + " 型号=" + pv.Model);
+                bool inHist = _records.Any(delegate(DeviceRecord r) { return r.SN == sn && r.MAC == mac; });
+                ShellApp.Globals.TestMode = oldTest;
+                return "输入框[" + fields + "] 预览保留[" + prev + "] 历史条数=" + _records.Count + " 已入库=" + inHist;
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
 
         // 自测：走一遍「删除选中」（confirm=是否点“是”）；跳过防连点，专测确认逻辑
         internal string TestDeleteSelected(bool confirm)
@@ -4903,14 +5036,19 @@ namespace LabelPrinterApp
                 if (string.IsNullOrWhiteSpace(sn) && string.IsNullOrWhiteSpace(mac)) return false;
                 string model, type, rawqr;
                 d.TryGetValue("model", out model); d.TryGetValue("type", out type); d.TryGetValue("rawqr", out rawqr);
-                txtModel.Text = model ?? "";
-                txtType.Text = type ?? "";
-                txtSN.Text = sn ?? "";
-                txtMAC.Text = mac ?? "";
-                _macDirty = true;                  // 恢复"最近打印"内容时也算新数据，便于重打
-                _lastRawQR = rawqr ?? "";
+                // 只把"上次打印的那一台"恢复到预览里；输入框留空，方便直接扫下一台
+                var keep = new DeviceRecord();
+                keep.Time = DateTime.Now;
+                keep.Model = model ?? "";
+                keep.Type = type ?? "";
+                keep.SN = sn ?? "";
+                keep.MAC = mac ?? "";
+                keep.RawQR = rawqr ?? "";
+                _previewKeep = keep;
+                _macDirty = false;
                 _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
-                SetStatus(_fixedModel ? "已恢复上次打印内容，扫描下一台" : "已恢复上次打印内容，扫描下一台", Color.DodgerBlue);
+                UpdatePreview();
+                SetStatus("预览保留上次打印的那一台，直接扫下一台即可", Color.DodgerBlue);
                 return true;
             }
             catch { return false; }
@@ -5064,7 +5202,7 @@ namespace LabelPrinterApp
         {
             try
             {
-                var rec = CurrentRecord();
+                var rec = PreviewRecord();      // 输入框清空后继续显示最后打印的那台
                 List<string> warnings;
                 var old = _labelBitmap;
                 _labelBitmap = LabelRenderer.Render(rec, _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi, _settings.Layout, out warnings, true);
@@ -5109,7 +5247,7 @@ namespace LabelPrinterApp
             {
                 var it = _settings.Layout[i];
                 if (!it.Visible) continue;
-                var r = LabelRenderer.ItemRect(it, CurrentRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
+                var r = LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
                 if (r.Contains(p.Value))
                 {
                     hit = it;
@@ -5170,7 +5308,7 @@ namespace LabelPrinterApp
                     {
                         var it = _settings.Layout[i];
                         if (!it.Visible) continue;
-                        if (LabelRenderer.ItemRect(it, CurrentRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi).Contains(p.Value)) { over = true; break; }
+                        if (LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi).Contains(p.Value)) { over = true; break; }
                     }
                 }
                 picPreview.Cursor = over ? Cursors.Hand : Cursors.Default;
@@ -5203,7 +5341,7 @@ namespace LabelPrinterApp
         private void SelectItem(LayoutItem it)
         {
             _selItem = it;
-            _selRect = it == null ? RectangleF.Empty : LabelRenderer.ItemRect(it, CurrentRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
+            _selRect = it == null ? RectangleF.Empty : LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
             BindProps(it);
             picPreview.Invalidate();
         }
