@@ -907,6 +907,7 @@ namespace LabelPrinterApp
         public bool NasSyncEnabled = false;   // 是否开启 NAS 备份同步
         public string NasPath = "";           // NAS 备份目录
         public bool AutoEnglish = true;       // 打开软件/点扫码框时，自动把中文输入法切到英文（防止模拟按键被输入法吃掉）
+        public bool LockModelType = false;    // 锁定型号/类型：打印后保留，适合连续录入同一型号的无二维码设备
         public List<LayoutItem> Layout = LayoutItem.DefaultLayout(85, 35);
 
         public string Path;
@@ -941,6 +942,7 @@ namespace LabelPrinterApp
                 if (d.ContainsKey("updateToken")) UpdateToken = d["updateToken"];
                 if (d.ContainsKey("barcodeWidth")) BarcodeWidth = (int)ParseD(d["barcodeWidth"], BarcodeWidth);
                 if (d.ContainsKey("autoEnglish")) AutoEnglish = ParseB(d["autoEnglish"], AutoEnglish);
+                if (d.ContainsKey("lockModelType")) LockModelType = ParseB(d["lockModelType"], LockModelType);
                 if (d.ContainsKey("nasSyncEnabled")) NasSyncEnabled = ParseB(d["nasSyncEnabled"], false);
                 if (d.ContainsKey("nasPath")) NasPath = d["nasPath"];
                 if (string.IsNullOrWhiteSpace(UpdateUrl)) UpdateUrl = DefaultUpdateUrl;
@@ -992,6 +994,7 @@ namespace LabelPrinterApp
                 sb.AppendLine("nasSyncEnabled=" + (NasSyncEnabled ? "1" : "0"));
                 sb.AppendLine("nasPath=" + NasPath);
                 sb.AppendLine("autoEnglish=" + (AutoEnglish ? "1" : "0"));
+                sb.AppendLine("lockModelType=" + (LockModelType ? "1" : "0"));
                 foreach (var it in Layout)
                 {
                     sb.AppendLine("layout." + it.Id + ".x=" + it.Xmm.ToString("0.##", CultureInfo.InvariantCulture));
@@ -1146,7 +1149,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.11";
+        public const string AppVersion = "2.3.12";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2357,6 +2360,8 @@ namespace LabelPrinterApp
         private TextBox txtScan, txtSN, txtMAC;
         // 固定型号模式下，型号/类型既可以从历史记录下拉选择，也可以直接手输。
         private ComboBox txtModel, txtType;
+        private CheckBox chkLockModelType;   // 打印后保留型号/类型（无二维码连续录入）
+        private readonly ToolTip _scanTip = new ToolTip { InitialDelay = 250, ReshowDelay = 100 };
         private TextBox txtNetPrinter;
         private Label lblStatus, lblStep, lblToday;
         private CheckBox chkAuto, chkModel, chkType, chkSN, chkMAC;
@@ -2440,6 +2445,30 @@ namespace LabelPrinterApp
                 if (txtMAC != null) txtMAC.Text = "";
                 _macDirty = false;
                 _pendingSnNoModel = false;
+            }
+            catch { }
+        }
+
+        private bool IsModelTypeLocked
+        {
+            get { return chkLockModelType != null && chkLockModelType.Checked; }
+        }
+
+        /// <summary>
+        /// 扫描/OCR 读到型号或类型时如何落框。
+        /// 未锁定时按原样覆盖；勾选“锁定型号/类型”后只补空值，不覆盖已经填好的内容。
+        /// </summary>
+        private void ApplyScannedModelType(string model, string type)
+        {
+            try
+            {
+                bool locked = IsModelTypeLocked;
+                if (!string.IsNullOrWhiteSpace(model) &&
+                    (!locked || string.IsNullOrWhiteSpace(txtModel.Text)))
+                    txtModel.Text = model.Trim();
+                if (!string.IsNullOrWhiteSpace(type) &&
+                    (!locked || string.IsNullOrWhiteSpace(txtType.Text)))
+                    txtType.Text = type.Trim();
             }
             catch { }
         }
@@ -2563,8 +2592,9 @@ namespace LabelPrinterApp
                 if (WinOcr.HasEpon(model + " " + type + " " + txtType.Text + " " + _lastRawQR)) { EponAlerted("标签文字"); return true; }
                 type = NormalizeType(type, model + " " + _lastRawQR + " " + txtSN.Text + " " + (System.IO.File.Exists("")?"":"") );
                 DropStaleDeviceFields(sn, mac);
-                if (!string.IsNullOrWhiteSpace(model)) { txtModel.Text = model.Trim(); any = true; }
-                if (!string.IsNullOrWhiteSpace(type)) { txtType.Text = type.Trim(); any = true; }
+                ApplyScannedModelType(model, type);
+                if (!string.IsNullOrWhiteSpace(model)) any = true;
+                if (!string.IsNullOrWhiteSpace(type)) any = true;
                 if (!string.IsNullOrWhiteSpace(sn)) { txtSN.Text = sn.Trim(); any = true; }
                 if (!string.IsNullOrWhiteSpace(mac)) { txtMAC.Text = mac.Trim(); _macDirty = true; any = true; }
                 if (!any) return false;
@@ -2595,21 +2625,22 @@ namespace LabelPrinterApp
                 foreach (var r in _records)
                     if (!string.IsNullOrWhiteSpace(r.Model) && r.Model.Trim().Equals(model.Trim(), StringComparison.OrdinalIgnoreCase)
                         && !string.IsNullOrWhiteSpace(r.Type)) { type = r.Type; break; }
-                txtModel.Text = model.Trim();
-                if (!string.IsNullOrEmpty(type)) txtType.Text = type;
+                ApplyScannedModelType(model, type);
+                string actualModel = (txtModel.Text ?? "").Trim();
                 if (_scanState == ScanState.AwaitQR && !string.IsNullOrWhiteSpace(txtSN.Text))
                 {
                     _pendingSnNoModel = false;
                     _scanState = ScanState.AwaitMAC;
-                    SetStatus("型号已识别（" + model + "），接下来对齐 MAC 条码", Color.DodgerBlue);
+                    SetStatus("型号已识别（" + actualModel + "），接下来对齐 MAC 条码", Color.DodgerBlue);
                 }
                 else if (_pendingSnNoModel && !string.IsNullOrWhiteSpace(txtModel.Text))
                 {
                     _pendingSnNoModel = false;
                     _scanState = ScanState.AwaitMAC;
-                    SetStatus("型号已填（" + model + "），接下来对齐 MAC 条码", Color.DodgerBlue);
+                    SetStatus("型号已填（" + actualModel + "），接下来对齐 MAC 条码", Color.DodgerBlue);
                 }
-                else SetStatus("已填入型号：" + model, Color.SeaGreen);
+                else SetStatus(IsModelTypeLocked ? "型号/类型已锁定为：" + actualModel + " / " + (txtType.Text ?? "").Trim()
+                                                 : "已填入型号：" + actualModel, Color.SeaGreen);
                 return true;
             }
             catch { return false; }
@@ -3262,8 +3293,33 @@ namespace LabelPrinterApp
             lblStep = new Label { Text = "第 1 步：扫描二维码\n第 2 步：扫描 MAC 条码", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 0, 0, 6) };
             t.Controls.Add(lblStep, 0, 6); t.SetColumnSpan(lblStep, 2);
 
-            var lblHeader = new Label { Text = "当前设备数据（可手动修改）", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), Margin = new Padding(0, 4, 0, 6) };
-            t.Controls.Add(lblHeader, 0, 7); t.SetColumnSpan(lblHeader, 2);
+            // 红框中间：标题和锁定开关同一行，避免新增一行把底部按钮挤出可视区。
+            var headerRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            var lblHeader = new Label { Text = "当前设备数据", AutoSize = true, Font = new Font("Microsoft YaHei", 9F, FontStyle.Bold), Margin = new Padding(0, 4, 10, 6) };
+            _scanTip.SetToolTip(lblHeader, "型号、类型、SN、MAC 都可以手动修改。");
+            headerRow.Controls.Add(lblHeader);
+            // 勾选后打印完成仍保留，适合连续录入同一型号的无二维码设备；
+            // SN/MAC 始终清空，避免下一台串数据。
+            chkLockModelType = new CheckBox
+            {
+                Text = "锁定型号/类型",
+                AutoSize = true,
+                Checked = _settings.LockModelType,
+                Margin = new Padding(0, 3, 0, 5)
+            };
+            chkLockModelType.CheckedChanged += (s, e) =>
+            {
+                _settings.LockModelType = chkLockModelType.Checked;
+                _settings.Save();
+                SetStatus(chkLockModelType.Checked
+                    ? "已锁定型号/类型：打印后只清空 SN/MAC，型号/类型保留"
+                    : "已取消锁定：打印后会按原模式清空型号/类型", Color.DodgerBlue);
+            };
+            _scanTip.SetToolTip(chkLockModelType,
+                "勾选后，打印完成的型号/类型仍然保留，扫码伴侣可以继续录入没有二维码的同型号设备。\n" +
+                "SN 和 MAC 仍会清空，不会把上一台的条码带到下一台。");
+            headerRow.Controls.Add(chkLockModelType);
+            t.Controls.Add(headerRow, 0, 7); t.SetColumnSpan(headerRow, 2);
 
             AddFieldRow(t, "型号：", 8, out txtModel);
             AddFieldRow(t, "类型：", 9, out txtType);
@@ -4183,8 +4239,7 @@ namespace LabelPrinterApp
                     if (WinOcr.HasBadTech(s + " " + pq.Model)) { EponAlerted("二维码"); return ScanFeed.Ignored; }
                     DropStaleMacForNewSn(pq.SN);
                     _lastRawQR = s;
-                    txtModel.Text = pq.Type;
-                    txtType.Text = pq.Model;
+                    ApplyScannedModelType(pq.Type, pq.Model);
                     txtSN.Text = pq.SN;
                     _scanState = ScanState.AwaitMAC;
                     _pendingSnNoModel = false;
@@ -4277,10 +4332,11 @@ namespace LabelPrinterApp
                         string m2, t2;
                         if (GuessModelFromHistory(s, out m2, out t2) && !string.IsNullOrEmpty(m2))
                         {
-                            txtModel.Text = m2;
-                            if (!string.IsNullOrEmpty(t2)) txtType.Text = t2;
+                            ApplyScannedModelType(m2, t2);
                             _scanState = ScanState.AwaitMAC;
-                            SetStatus("这台没有二维码：已按 SN 反查出型号 " + m2 + "，接下来扫 MAC 条码", Color.DodgerBlue);
+                            SetStatus(IsModelTypeLocked
+                                ? "这台没有二维码：型号/类型已锁定为「" + txtModel.Text.Trim() + " / " + txtType.Text.Trim() + "」，接下来扫 MAC 条码"
+                                : "这台没有二维码：已按 SN 反查出型号 " + m2 + "，接下来扫 MAC 条码", Color.DodgerBlue);
                         }
                         else
                         {
@@ -4308,8 +4364,7 @@ namespace LabelPrinterApp
                 }
                 DropStaleMacForNewSn(p.SN);
                 _lastRawQR = s;
-                txtModel.Text = p.Type;
-                txtType.Text = p.Model;
+                ApplyScannedModelType(p.Type, p.Model);
                 txtSN.Text = p.SN;
                 _scanState = ScanState.AwaitMAC;
                 SetStatus("已识别二维码，请扫描 MAC 条码…", Color.DodgerBlue);
@@ -4398,12 +4453,13 @@ namespace LabelPrinterApp
                 // 打印成功后：左边「当前设备数据」清空（方便直接扫下一台），
                 // 但标签预览保留刚才打印的这一台（_previewKeep）
                 _previewKeep = CloneRecord(rec);
-                ClearInputs();          // 清空输入框 + 刷新预览（预览用的是 _previewKeep）
+                bool keepModelType = _fixedModel || IsModelTypeLocked;
+                ClearInputs(keepModelType);   // 勾了锁定：保留型号/类型，只清 SN/MAC
                 SetStatus(testMode
-                    ? (dup ? "测试模式：已模拟打印并保存（该设备之前已录入过）·数据已清空、预览保留这一台"
-                           : "测试模式：已模拟打印并保存，等待下一台…（数据已清空、预览保留这一台）")
-                    : (dup ? "已打印并保存（该设备之前已录入过）·数据已清空、预览保留这一台"
-                           : "已打印并保存，等待下一台…（数据已清空、预览保留这一台）"),
+                    ? (dup ? "测试模式：已模拟打印并保存（该设备之前已录入过）·" + (keepModelType ? "SN/MAC 已清空、型号/类型已保留" : "数据已清空") + "、预览保留这一台"
+                           : "测试模式：已模拟打印并保存，等待下一台…（" + (keepModelType ? "SN/MAC 已清空、型号/类型已保留" : "数据已清空") + "、预览保留这一台）")
+                    : (dup ? "已打印并保存（该设备之前已录入过）·" + (keepModelType ? "SN/MAC 已清空、型号/类型已保留" : "数据已清空") + "、预览保留这一台"
+                           : "已打印并保存，等待下一台…（" + (keepModelType ? "SN/MAC 已清空、型号/类型已保留" : "数据已清空") + "、预览保留这一台）"),
                     dup ? Color.Red : (testMode ? Color.DarkOrange : Color.SeaGreen));
                 txtScan.Focus();
             }
@@ -4629,6 +4685,68 @@ namespace LabelPrinterApp
             catch (Exception ex) { return "ERR " + ex; }
         }
 
+        // 仅自测：勾选“锁定型号/类型”后，连续无二维码录入不清型号/类型；
+        // 扫到不同型号的二维码也不覆盖；取消勾选后恢复“打印完清空”。
+        internal string TestModelTypeLock()
+        {
+            try
+            {
+                bool oldTest = ShellApp.Globals.TestMode;
+                bool oldAuto = chkAuto.Checked;
+                bool oldLock = chkLockModelType.Checked;
+                ShellApp.Globals.TestMode = true;
+                chkAuto.Checked = true;
+                chkModel.Checked = true;
+                chkType.Checked = true;
+                chkSN.Checked = true;
+                chkMAC.Checked = true;
+                SetMode(false);
+                chkLockModelType.Checked = true;
+                txtModel.Text = "LOCK-MODEL";
+                txtType.Text = "GPON";
+                ClearInputs(true);
+                int before = _records.Count;
+                string tail = DateTime.Now.ToString("HHmmss");
+
+                ProcessScanText("TSTL1" + tail, false);
+                ProcessScanText("A1B2D1" + tail, false);
+                bool firstKeep = string.Equals(txtModel.Text, "LOCK-MODEL", StringComparison.OrdinalIgnoreCase)
+                                 && string.Equals(txtType.Text, "GPON", StringComparison.OrdinalIgnoreCase)
+                                 && string.IsNullOrWhiteSpace(txtSN.Text)
+                                 && string.IsNullOrWhiteSpace(txtMAC.Text);
+                string first = TestInputs() + " | 状态=" + TestStatusText();
+
+                string qr = "http://op.smartont.net/app/download?model=GPON&type=OTHER-MODEL&sn=TSTL2"
+                          + tail + "&serialnumber=A1B2D2" + tail;
+                ProcessScanText(qr, false);
+                bool qrKeep = string.Equals(txtModel.Text, "LOCK-MODEL", StringComparison.OrdinalIgnoreCase)
+                              && string.Equals(txtType.Text, "GPON", StringComparison.OrdinalIgnoreCase)
+                              && string.Equals(txtSN.Text, "TSTL2" + tail, StringComparison.OrdinalIgnoreCase);
+                string qrState = TestInputs() + " | 状态=" + TestStatusText();
+
+                chkLockModelType.Checked = false;
+                SetMode(false);
+                ProcessScanText("TSTL3" + tail, false);
+                ProcessScanText("A1B2D3" + tail, false);
+                bool unlockedCleared = string.IsNullOrWhiteSpace(txtModel.Text)
+                                       && string.IsNullOrWhiteSpace(txtType.Text)
+                                       && string.IsNullOrWhiteSpace(txtSN.Text)
+                                       && string.IsNullOrWhiteSpace(txtMAC.Text);
+                string third = TestInputs() + " | 状态=" + TestStatusText();
+                bool pass = firstKeep && qrKeep && unlockedCleared && _records.Count == before + 2;
+
+                chkAuto.Checked = oldAuto;
+                chkLockModelType.Checked = oldLock;
+                ShellApp.Globals.TestMode = oldTest;
+                return "① 无二维码第一台打印后：" + first + " → " + (firstKeep ? "型号/类型保留 PASS" : "FAIL") + "\r\n"
+                     + "② 再扫不同型号二维码：" + qrState + " → " + (qrKeep ? "锁定未被覆盖 PASS" : "FAIL") + "\r\n"
+                     + "③ 取消锁定后再打印：" + third + " → " + (unlockedCleared ? "恢复清空 PASS" : "FAIL") + "\r\n"
+                     + "历史新增=" + (_records.Count - before) + "（应为 2）\r\n"
+                     + "结果=" + (pass ? "PASS" : "FAIL");
+            }
+            catch (Exception ex) { return "ERR " + ex; }
+        }
+
         // 与扫码枪流程等价（同样的校验、同样的 EPON 拦截、同样的自动打印开关）
         internal ScanFeed FeedDevice(string qrText, List<string> codes, bool guessFromHistory)
         {
@@ -4687,7 +4805,7 @@ namespace LabelPrinterApp
                         newDevice = false;                    // 分不清是哪台：不动已有内容，也不打印（下面会走 Partial）
                     if (newDevice)
                     {
-                        if (!_fixedModel) { txtModel.Text = ""; txtType.Text = ""; }
+                        if (!_fixedModel && !IsModelTypeLocked) { txtModel.Text = ""; txtType.Text = ""; }
                         txtSN.Text = "";
                         txtMAC.Text = "";
                         _macDirty = false;
@@ -4720,9 +4838,9 @@ namespace LabelPrinterApp
                 }
 
                 // ② 没有二维码：用 SN 条码反查型号（和原来的逻辑一样，可勾选关闭）
-                bool hasModel = false, hasType = false;
-                if (!string.IsNullOrEmpty(model)) { txtModel.Text = model.Trim(); hasModel = true; }
-                if (!string.IsNullOrEmpty(type)) { txtType.Text = type.Trim(); hasType = true; }
+                ApplyScannedModelType(model, type);
+                bool hasModel = !string.IsNullOrWhiteSpace(txtModel.Text);
+                bool hasType = !string.IsNullOrWhiteSpace(txtType.Text);
                 if (string.IsNullOrEmpty(sn) && !string.IsNullOrEmpty(snCode)) sn = snCode;
                 if (!string.IsNullOrEmpty(sn)) txtSN.Text = sn.Trim();
                 if (!string.IsNullOrEmpty(mac)) { txtMAC.Text = mac; _macDirty = true; }
@@ -4733,8 +4851,9 @@ namespace LabelPrinterApp
                     string m2, t2;
                     if (GuessModelFromHistory(txtSN.Text, out m2, out t2))
                     {
-                        if (!string.IsNullOrEmpty(m2)) { txtModel.Text = m2; hasModel = true; }
-                        if (!string.IsNullOrEmpty(t2)) { txtType.Text = t2; hasType = true; }
+                        ApplyScannedModelType(m2, t2);
+                        if (!string.IsNullOrEmpty(m2)) hasModel = true;
+                        if (!string.IsNullOrEmpty(t2)) hasType = true;
                     }
                 }
 
@@ -4789,17 +4908,26 @@ namespace LabelPrinterApp
                     DropStaleMacForNewSn(sn);
                     txtSN.Text = sn.Trim();
                     _lastRawQR = "";
+                    if (IsModelTypeLocked && !string.IsNullOrWhiteSpace(txtModel.Text))
+                    {
+                        _pendingSnNoModel = false;
+                        _scanState = ScanState.AwaitMAC;
+                        SetStatus("没有二维码：型号/类型使用已锁定的「" + txtModel.Text.Trim() + " / " +
+                                  txtType.Text.Trim() + "」，接下来对齐 MAC 条码", Color.DodgerBlue);
+                        return true;
+                    }
                     _pendingSnNoModel = true;
                     SetStatus("没有二维码，也没查到型号：请点『识别型号文字(OCR)』或手动填型号，然后对齐 MAC", Color.DarkOrange);
                     return true;
                 }
                 DropStaleMacForNewSn(sn);
-                txtModel.Text = model;
-                txtType.Text = type;
+                ApplyScannedModelType(model, type);
                 txtSN.Text = sn.Trim();
                 _lastRawQR = "";
                 _scanState = ScanState.AwaitMAC;
-                SetStatus("没有二维码：已用 SN 反查出型号 " + model + "，接下来对齐 MAC 条码", Color.DodgerBlue);
+                SetStatus(IsModelTypeLocked
+                    ? "没有二维码：型号/类型使用已锁定的「" + txtModel.Text.Trim() + " / " + txtType.Text.Trim() + "」，接下来对齐 MAC 条码"
+                    : "没有二维码：已用 SN 反查出型号 " + model + "，接下来对齐 MAC 条码", Color.DodgerBlue);
                 return true;
             }
             catch { return false; }
@@ -5189,7 +5317,12 @@ namespace LabelPrinterApp
 
         private void ClearInputs()
         {
-            if (!_fixedModel)
+            ClearInputs(false);
+        }
+
+        private void ClearInputs(bool keepModelType)
+        {
+            if (!_fixedModel && !keepModelType)
             {
                 txtModel.Text = "";
                 txtType.Text = "";
@@ -5199,7 +5332,12 @@ namespace LabelPrinterApp
             _macDirty = false;
             _lastRawQR = "";
             _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
-            SetStatus(_fixedModel ? "请扫描 SN 条码…" : "请扫描设备二维码…", Color.DodgerBlue);
+            SetStatus(_fixedModel
+                ? "请扫描 SN 条码…"
+                : (keepModelType
+                    ? "型号/类型已保留，请扫描下一台设备二维码或 SN…"
+                    : "请扫描设备二维码…"),
+                Color.DodgerBlue);
             txtScan.Focus();
             UpdatePreview();
         }
@@ -5278,6 +5416,10 @@ namespace LabelPrinterApp
             _macDirty = false;
             _pendingSnNoModel = false;
             _lastRawQR = "";
+            if (chkLockModelType != null)
+            {
+                chkLockModelType.Enabled = !fixedModel;   // 固定型号模式本来就保留型号/类型
+            }
             if (lblStep != null)
                 lblStep.Text = fixedModel
                     ? "第 1 步：填写型号/类型\n第 2 步：扫描 SN 条码\n第 3 步：扫描 MAC 条码"
@@ -5319,6 +5461,7 @@ namespace LabelPrinterApp
             chkType.Checked = _settings.ShowType;
             chkSN.Checked = _settings.ShowSN;
             chkMAC.Checked = _settings.ShowMAC;
+            if (chkLockModelType != null) chkLockModelType.Checked = _settings.LockModelType;
             _suppressProps = false;
             if (!string.IsNullOrEmpty(_settings.Printer))
             {
