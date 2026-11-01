@@ -331,6 +331,43 @@ namespace LabelPrinterApp
             bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
             bmp.Dispose();
         }
+
+        public static void RunLongModel(string resultPath, string imagePath, string model)
+        {
+            var rec = new DeviceRecord
+            {
+                Time = DateTime.Now,
+                Model = string.IsNullOrEmpty(model)
+                    ? "ZXHN F677V2-超长型号-SUPER-LONG-MODEL-2026-ABCDEFG"
+                    : model,
+                Type = "GPON",
+                SN = "ZTEGCB8E4525",
+                MAC = "4413D003B768"
+            };
+            var items = LayoutItem.DefaultLayout(85, 35);
+            List<string> warnings;
+            using (var bmp = LabelRenderer.Render(rec, 85, 35, 203, items, out warnings, false))
+                bmp.Save(imagePath, System.Drawing.Imaging.ImageFormat.Png);
+
+            var modelItem = items.Find(x => x.Id == "model_text");
+            var typeItem = items.Find(x => x.Id == "type_text");
+            var mr = LabelRenderer.ItemRect(modelItem, rec, 85, 35, 203, items);
+            var tr = LabelRenderer.ItemRect(typeItem, rec, 85, 35, 203, items);
+            float gap = tr.Left - mr.Right;
+            bool overlap = mr.IntersectsWith(tr);
+            bool sameLine = mr.Top < tr.Bottom && tr.Top < mr.Bottom;
+            bool pass = !overlap && (!sameLine || gap >= 8f);
+            string text = "型号长度=" + rec.Model.Length + "\r\n"
+                        + "型号矩形=" + mr.X.ToString("0") + "," + mr.Y.ToString("0") + " "
+                        + mr.Width.ToString("0") + "×" + mr.Height.ToString("0") + "\r\n"
+                        + "类型矩形=" + tr.X.ToString("0") + "," + tr.Y.ToString("0") + " "
+                        + tr.Width.ToString("0") + "×" + tr.Height.ToString("0") + "\r\n"
+                        + "水平间距=" + gap.ToString("0.0") + "px\r\n"
+                        + "同一行=" + sameLine + "\r\n"
+                        + "重叠=" + overlap + "\r\n"
+                        + "结果=" + (pass ? "PASS" : "FAIL");
+            File.WriteAllText(resultPath, text, new UTF8Encoding(false));
+        }
     }
 
     internal static class LayoutTest
@@ -766,6 +803,16 @@ namespace LabelPrinterApp
 
     internal static class LabelRenderer
     {
+        private sealed class TextDrawInfo
+        {
+            public string Text;
+            public float FontPt;
+            public bool Bold;
+            public float CenterX;
+            public float TopY;
+            public RectangleF Rect;
+        }
+
         public static int MmToPx(double mm, int dpi)
         {
             return (int)Math.Round(mm / 25.4 * dpi);
@@ -805,6 +852,145 @@ namespace LabelPrinterApp
             return it.Id == "sn_barcode" ? r.SN : r.MAC;
         }
 
+        private static RectangleF MeasureTextRect(Graphics g, string text, float fontPt, bool bold,
+                                                  float centerX, float topY)
+        {
+            using (var f = MakeFont(fontPt, bold))
+            {
+                var sz = g.MeasureString(text, f);
+                return new RectangleF(centerX - sz.Width / 2f, topY, sz.Width, sz.Height);
+            }
+        }
+
+        private static float FitTextToWidth(Graphics g, string text, float fontPt, bool bold, float maxWidth)
+        {
+            float pt = fontPt;
+            while (pt > 4f)
+            {
+                using (var f = MakeFont(pt, bold))
+                {
+                    if (g.MeasureString(text, f).Width <= maxWidth) break;
+                }
+                pt = Math.Max(4f, pt - 0.25f);
+            }
+            return pt;
+        }
+
+        private static void ClampTextRect(TextDrawInfo info, int wPx, int hPx, float marginPx, float maxWidth)
+        {
+            if (info == null) return;
+            if (info.Rect.Width > maxWidth)
+                info.Rect.Width = maxWidth;
+            info.Rect.X = Math.Max(marginPx,
+                Math.Min(info.Rect.X, wPx - marginPx - info.Rect.Width));
+            info.Rect.Y = Math.Max(0f, Math.Min(info.Rect.Y, hPx - info.Rect.Height));
+        }
+
+        private static bool ModelTypeConflict(TextDrawInfo model, TextDrawInfo type, float gapPx)
+        {
+            if (model == null || type == null) return false;
+            bool vertical = model.Rect.Top < type.Rect.Bottom && type.Rect.Top < model.Rect.Bottom;
+            if (!vertical) return false;
+            TextDrawInfo left = model.Rect.X <= type.Rect.X ? model : type;
+            TextDrawInfo right = left == model ? type : model;
+            return left.Rect.Right + gapPx > right.Rect.Left;
+        }
+
+        /// <summary>
+        /// 先按字体测量文本；型号/类型仍在同一行重叠时，优先缩小型号，必要时再缩小类型，
+        /// 最后分别靠左/靠右排开。返回的矩形同时用于绘制和鼠标命中框，预览、打印拖动保持一致。
+        /// </summary>
+        private static Dictionary<string, TextDrawInfo> BuildTextLayout(
+            Graphics g, List<LayoutItem> items, DeviceRecord r, bool placeholder,
+            int wPx, int hPx, int dpi)
+        {
+            var map = new Dictionary<string, TextDrawInfo>(StringComparer.OrdinalIgnoreCase);
+            float marginPx = MmToPx(2, dpi);
+            float maxWidth = Math.Max(1f, wPx - marginPx * 2f);
+            foreach (var it in items)
+            {
+                if (!it.Visible || it.IsBarcode) continue;
+                string text = TextFor(it, r, placeholder);
+                if (string.IsNullOrEmpty(text)) continue;
+
+                float pt = FitTextToWidth(g, text, (float)it.FontSizePt, it.Bold, maxWidth);
+                var info = new TextDrawInfo
+                {
+                    Text = text,
+                    FontPt = pt,
+                    Bold = it.Bold,
+                    CenterX = MmToPx(it.Xmm, dpi),
+                    TopY = MmToPx(it.Ymm, dpi)
+                };
+                info.Rect = MeasureTextRect(g, text, info.FontPt, info.Bold, info.CenterX, info.TopY);
+                ClampTextRect(info, wPx, hPx, marginPx, maxWidth);
+                map[it.Id] = info;
+            }
+
+            TextDrawInfo model, type;
+            if (map.TryGetValue("model_text", out model) && map.TryGetValue("type_text", out type))
+            {
+                float gapPx = Math.Max(2f, MmToPx(1.2, dpi));
+                if (ModelTypeConflict(model, type, gapPx))
+                {
+                    // 型号和类型共同缩放到能放进同一行，避免只缩小型号导致字体过小。
+                    float totalWidth = Math.Max(1f, model.Rect.Width + type.Rect.Width);
+                    float room = Math.Max(1f, maxWidth - gapPx);
+                    float scale = Math.Min(1f, room / totalWidth);
+                    model.FontPt = Math.Max(4f, model.FontPt * scale);
+                    type.FontPt = Math.Max(4f, type.FontPt * scale);
+                    model.Rect = MeasureTextRect(g, model.Text, model.FontPt, model.Bold, model.CenterX, model.TopY);
+                    type.Rect = MeasureTextRect(g, type.Text, type.FontPt, type.Bold, type.CenterX, type.TopY);
+                    ClampTextRect(model, wPx, hPx, marginPx, maxWidth);
+                    ClampTextRect(type, wPx, hPx, marginPx, maxWidth);
+
+                    // 仍冲突时把型号靠左、类型靠右，充分利用整张标签的宽度。
+                    bool modelOnLeft = model.CenterX <= type.CenterX;
+                    TextDrawInfo left = modelOnLeft ? model : type;
+                    TextDrawInfo right = modelOnLeft ? type : model;
+                    left.Rect.X = marginPx;
+                    right.Rect.X = Math.Max(marginPx, wPx - marginPx - right.Rect.Width);
+
+                    // 字体测量有少量像素取整误差：再微缩几次，避免只差 1~2px 就过早换行。
+                    for (int retry = 0; retry < 4 && ModelTypeConflict(model, type, gapPx); retry++)
+                    {
+                        model.FontPt = Math.Max(4f, model.FontPt * 0.94f);
+                        type.FontPt = Math.Max(4f, type.FontPt * 0.94f);
+                        model.Rect = MeasureTextRect(g, model.Text, model.FontPt, model.Bold, model.CenterX, model.TopY);
+                        type.Rect = MeasureTextRect(g, type.Text, type.FontPt, type.Bold, type.CenterX, type.TopY);
+                        left.Rect.X = marginPx;
+                        right.Rect.X = Math.Max(marginPx, wPx - marginPx - right.Rect.Width);
+                    }
+
+                    // 极端超长型号连最小字号也放不下时，把类型移到型号下面，
+                    // 但仍限制在下一个元素（通常是 SN 条码）之前，避免压到条码。
+                    if (ModelTypeConflict(model, type, gapPx))
+                    {
+                        float startY = Math.Min(model.Rect.Top, type.Rect.Top);
+                        float nextTop = hPx;
+                        foreach (var other in items)
+                        {
+                            if (!other.Visible || other.Id == "model_text" || other.Id == "type_text") continue;
+                            float oy = MmToPx(other.Ymm, dpi);
+                            if (oy > startY + 1f && oy < nextTop) nextTop = oy;
+                        }
+
+                        model.Rect.X = marginPx;
+                        type.Rect.X = Math.Max(marginPx, wPx - marginPx - type.Rect.Width);
+                        model.Rect.Y = startY;
+                        type.Rect.Y = model.Rect.Bottom + 1f;
+                        if (type.Rect.Bottom > nextTop - 1f && startY > marginPx)
+                        {
+                            startY = marginPx;
+                            model.Rect.Y = startY;
+                            type.Rect.Y = model.Rect.Bottom + 1f;
+                        }
+                    }
+                }
+            }
+            return map;
+        }
+
         public static Bitmap Render(DeviceRecord r, double Wmm, double Hmm, int dpi, List<LayoutItem> items, out List<string> warnings, bool placeholder)
         {
             warnings = new List<string>();
@@ -817,6 +1003,7 @@ namespace LabelPrinterApp
                 g.Clear(Color.White);
                 g.SmoothingMode = SmoothingMode.None;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixel;
+                var textLayout = BuildTextLayout(g, items, r, placeholder, wPx, hPx, dpi);
                 foreach (var it in items)
                 {
                     if (!it.Visible) continue;
@@ -838,16 +1025,15 @@ namespace LabelPrinterApp
                     }
                     else
                     {
-                        string text = TextFor(it, r, placeholder);
-                        if (string.IsNullOrEmpty(text)) continue;
-                        using (var f = MakeFont((float)it.FontSizePt, it.Bold))
+                        TextDrawInfo info;
+                        if (!textLayout.TryGetValue(it.Id, out info)) continue;
+                        using (var f = MakeFont(info.FontPt, info.Bold))
                         using (var fmt = new StringFormat())
                         {
                             fmt.Alignment = StringAlignment.Center;
                             fmt.LineAlignment = StringAlignment.Near;
-                            var sz = g.MeasureString(text, f);
-                            var rect = new RectangleF(MmToPx(it.Xmm, dpi) - sz.Width / 2f, MmToPx(it.Ymm, dpi), sz.Width, sz.Height);
-                            g.DrawString(text, f, Brushes.Black, rect, fmt);
+                            fmt.FormatFlags |= StringFormatFlags.NoWrap;
+                            g.DrawString(info.Text, f, Brushes.Black, info.Rect, fmt);
                         }
                     }
                 }
@@ -855,9 +1041,11 @@ namespace LabelPrinterApp
             return bmp;
         }
 
-        public static RectangleF ItemRect(LayoutItem it, DeviceRecord r, double Wmm, double Hmm, int dpi)
+        public static RectangleF ItemRect(LayoutItem it, DeviceRecord r, double Wmm, double Hmm, int dpi,
+                                          List<LayoutItem> allItems)
         {
             int wPx = MmToPx(Wmm, dpi);
+            int hPx = MmToPx(Hmm, dpi);
             if (it.IsBarcode)
             {
                 string data = BarcodeDataFor(it, r);
@@ -874,14 +1062,16 @@ namespace LabelPrinterApp
             }
             else
             {
-                string text = TextFor(it, r, true);
-                using (var f = MakeFont((float)it.FontSizePt, it.Bold))
+                var items = allItems ?? new List<LayoutItem> { it };
+                using (var bmp = new Bitmap(1, 1))
                 {
-                    using (var bmp = new Bitmap(1, 1))
+                    bmp.SetResolution(dpi, dpi);
                     using (var g = Graphics.FromImage(bmp))
                     {
-                        var sz = g.MeasureString(text, f);
-                        return new RectangleF(MmToPx(it.Xmm, dpi) - sz.Width / 2f, MmToPx(it.Ymm, dpi), sz.Width, sz.Height);
+                        var map = BuildTextLayout(g, items, r, true, wPx, hPx, dpi);
+                        TextDrawInfo info;
+                        if (map.TryGetValue(it.Id, out info)) return info.Rect;
+                        return RectangleF.Empty;
                     }
                 }
             }
@@ -1149,7 +1339,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.12";
+        public const string AppVersion = "2.3.13";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -5607,7 +5797,8 @@ namespace LabelPrinterApp
             {
                 var it = _settings.Layout[i];
                 if (!it.Visible) continue;
-                var r = LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
+                var r = LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm,
+                                               _settings.Dpi, _settings.Layout);
                 if (r.Contains(p.Value))
                 {
                     hit = it;
@@ -5668,7 +5859,8 @@ namespace LabelPrinterApp
                     {
                         var it = _settings.Layout[i];
                         if (!it.Visible) continue;
-                        if (LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi).Contains(p.Value)) { over = true; break; }
+                        if (LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm,
+                                                   _settings.Dpi, _settings.Layout).Contains(p.Value)) { over = true; break; }
                     }
                 }
                 picPreview.Cursor = over ? Cursors.Hand : Cursors.Default;
@@ -5701,7 +5893,9 @@ namespace LabelPrinterApp
         private void SelectItem(LayoutItem it)
         {
             _selItem = it;
-            _selRect = it == null ? RectangleF.Empty : LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm, _settings.Dpi);
+            _selRect = it == null ? RectangleF.Empty
+                : LabelRenderer.ItemRect(it, PreviewRecord(), _settings.LabelWidthMm, _settings.LabelHeightMm,
+                                         _settings.Dpi, _settings.Layout);
             BindProps(it);
             picPreview.Invalidate();
         }
