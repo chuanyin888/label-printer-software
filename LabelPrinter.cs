@@ -1340,7 +1340,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.15";
+        public const string AppVersion = "2.3.16";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2573,6 +2573,8 @@ namespace LabelPrinterApp
         private CalDatePicker dpHistory;
         private DateTime _filterDate = DateTime.Today;
         private Timer _refreshTimer;
+        private Timer _externalLookupTimer;
+        private bool _externalFilling;
         // NAS 备份同步
         private TextBox txtNasPath;
         private RadioButton radNasOn, radNasOff;
@@ -2660,6 +2662,164 @@ namespace LabelPrinterApp
                 if (!string.IsNullOrWhiteSpace(type) &&
                     (!locked || string.IsNullOrWhiteSpace(txtType.Text)))
                     txtType.Text = type.Trim();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 缺字段时查 NAS 入库/检测数据。入库优先，检测兜底。
+        /// SN 命中时补/校正 MAC，MAC 命中时补/校正 SN；型号、类型只补空值。
+        /// </summary>
+        private bool FillMissingFromExternalTables(string reason)
+        {
+            if (_externalFilling) return false;
+            _externalFilling = true;
+            try
+            {
+                string sn = (txtSN.Text ?? "").Trim();
+                string mac = (txtMAC.Text ?? "").Trim();
+                if (sn.Length == 0 && mac.Length == 0) return false;
+                var hit = ShellApp.ExternalDeviceLookup.Find(sn, mac);
+                // 12 位码可能是 SN 也可能是 MAC：等超时后再尝试另一种解释。
+                if (hit == null && sn.Length > 0 && mac.Length == 0)
+                    hit = ShellApp.ExternalDeviceLookup.Find(null, sn);
+                else if (hit == null && mac.Length > 0 && sn.Length == 0)
+                    hit = ShellApp.ExternalDeviceLookup.Find(mac, null);
+                if (hit == null) return false;
+
+                bool changed = false;
+                string corrected = "";
+                if (hit.MatchedBy == "SN" && !string.IsNullOrWhiteSpace(hit.Mac))
+                {
+                    if (!string.Equals(mac, hit.Mac.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (mac.Length > 0) corrected = "MAC";
+                        txtMAC.Text = hit.Mac.Trim();
+                        _macDirty = true;
+                        changed = true;
+                    }
+                }
+                else if (hit.MatchedBy == "MAC" && !string.IsNullOrWhiteSpace(hit.Sn))
+                {
+                    if (!string.Equals(sn, hit.Sn.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (sn.Length > 0) corrected = "SN";
+                        txtSN.Text = hit.Sn.Trim();
+                        changed = true;
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(txtSN.Text) && !string.IsNullOrWhiteSpace(hit.Sn))
+                {
+                    txtSN.Text = hit.Sn.Trim();
+                    changed = true;
+                }
+                if (string.IsNullOrWhiteSpace(txtMAC.Text) && !string.IsNullOrWhiteSpace(hit.Mac))
+                {
+                    txtMAC.Text = hit.Mac.Trim();
+                    _macDirty = true;
+                    changed = true;
+                }
+
+                string oldModel = (txtModel.Text ?? "").Trim();
+                string oldType = (txtType.Text ?? "").Trim();
+                ApplyScannedModelType(hit.Model, hit.Type);
+                if (!string.Equals(oldModel, (txtModel.Text ?? "").Trim(), StringComparison.Ordinal) ||
+                    !string.Equals(oldType, (txtType.Text ?? "").Trim(), StringComparison.Ordinal))
+                    changed = true;
+
+                if (changed)
+                {
+                    _pendingSnNoModel = false;
+                    string msg = "已从" + hit.Source + "表补全（" + reason + "）："
+                               + "型号=" + (string.IsNullOrWhiteSpace(hit.Model) ? "-" : hit.Model)
+                               + "，类型=" + (string.IsNullOrWhiteSpace(hit.Type) ? "-" : hit.Type)
+                               + "，SN=" + (string.IsNullOrWhiteSpace(txtSN.Text) ? "-" : txtSN.Text.Trim())
+                               + "，MAC=" + (string.IsNullOrWhiteSpace(txtMAC.Text) ? "-" : txtMAC.Text.Trim())
+                               + (corrected.Length > 0 ? "；已校正" + corrected : "");
+                    SetStatus(msg, Color.SeaGreen);
+                    ShellApp.AppLog.Write("外部补全", msg + "；匹配=" + hit.MatchedBy);
+                }
+                return changed;
+            }
+            catch (Exception ex)
+            {
+                ShellApp.AppLog.Write("外部补全", "查询异常：" + ex.Message);
+                return false;
+            }
+            finally { _externalFilling = false; }
+        }
+
+        private void StopExternalLookupDelay()
+        {
+            try { if (_externalLookupTimer != null) _externalLookupTimer.Stop(); } catch { }
+        }
+
+        /// <summary>
+        /// 不在扫描第一段就查表。等界面 1.5 秒没有新的扫码输入、且数据仍不完整时，
+        /// 才认为“确实识别不出来”，这时再查入库（优先）和检测。
+        /// </summary>
+        private void ScheduleExternalLookupIfNeeded(string reason)
+        {
+            try
+            {
+                if (_externalFilling) return;
+                if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text))
+                {
+                    StopExternalLookupDelay();
+                    return;
+                }
+                if (string.IsNullOrEmpty(ValidateForPrint()))
+                {
+                    StopExternalLookupDelay();
+                    return;
+                }
+                if (_externalLookupTimer == null)
+                {
+                    _externalLookupTimer = new Timer { Interval = 1500 };
+                    _externalLookupTimer.Tick += (s, e) =>
+                    {
+                        try
+                        {
+                            _externalLookupTimer.Stop();
+                            if (_externalFilling) return;
+                            if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text)) return;
+                            if (string.IsNullOrEmpty(ValidateForPrint())) return;
+
+                            bool changed = FillMissingFromExternalTables("识别等待1.5秒后仍不完整");
+                            if (changed)
+                            {
+                                if (string.IsNullOrEmpty(ValidateForPrint()))
+                                {
+                                    if (chkAuto.Checked)
+                                    {
+                                        SetStatus("入库/检测表补全完成，正在打印…", Color.SeaGreen);
+                                        SaveAndPrint(true);
+                                    }
+                                    else
+                                    {
+                                        _scanState = _fixedModel ? ScanState.AwaitSN : ScanState.AwaitQR;
+                                        SetStatus("入库/检测表补全完成，可直接打印当前设备", Color.SeaGreen);
+                                    }
+                                }
+                                else
+                                {
+                                    SetStatus("入库/检测表只补了一部分，仍有必填项为空，请手动确认", Color.DarkOrange);
+                                }
+                            }
+                            else
+                            {
+                                SetStatus("识别等待1.5秒后仍不完整，入库/检测表未找到匹配；请手动补填", Color.DarkOrange);
+                                ShellApp.AppLog.Write("外部补全", "等待超时未命中：" +
+                                    (string.IsNullOrWhiteSpace(txtSN.Text) ? "" : " SN=" + txtSN.Text.Trim()) +
+                                    (string.IsNullOrWhiteSpace(txtMAC.Text) ? "" : " MAC=" + txtMAC.Text.Trim()) +
+                                    "；" + ShellApp.ExternalDeviceLookup.LastStatus);
+                            }
+                        }
+                        catch { }
+                    };
+                }
+                _externalLookupTimer.Stop();
+                _externalLookupTimer.Start();
             }
             catch { }
         }
@@ -3527,6 +3687,7 @@ namespace LabelPrinterApp
                         SetStatus("型号已填，接下来对齐 MAC 条码", Color.DodgerBlue);
                     }
                     UpdatePreview();
+                    ScheduleExternalLookupIfNeeded("字段变化");
                 };
             // 只差"型号/类型"的标签：填完型号一离开输入框，就把这一台接着打完（不用再点按钮）
             txtModel.Leave += (s, e) => AutoFinishAfterModelFilled();
@@ -4427,6 +4588,14 @@ namespace LabelPrinterApp
         // 返回 Ignored=没处理，Partial=已录入一半，Completed=已完成一台
         internal ScanFeed ProcessScanText(string input, bool fromCamera)
         {
+            StopExternalLookupDelay();   // 新输入到达：之前的“识别失败”等待作废
+            ScanFeed res = ProcessScanTextCore(input, fromCamera);
+            if (res != ScanFeed.Ignored) ScheduleExternalLookupIfNeeded("扫码输入完成");
+            return res;
+        }
+
+        private ScanFeed ProcessScanTextCore(string input, bool fromCamera)
+        {
             if (input == null) return ScanFeed.Ignored;
             string s = input.Trim();
             if (s.Length == 0) return ScanFeed.Ignored;
@@ -4475,6 +4644,13 @@ namespace LabelPrinterApp
                             return ScanFeed.Completed;
                         }
                     }
+                    if (!string.IsNullOrWhiteSpace(txtMAC.Text) && string.IsNullOrEmpty(ValidateForPrint()))
+                    {
+                        _scanState = ScanState.AwaitQR;
+                        SetStatus("已从入库/检测表补全，数据齐了（等待打印）", Color.SeaGreen);
+                        if (!fromCamera) txtScan.Focus();
+                        return ScanFeed.Completed;
+                    }
                     SetStatus("已识别二维码，请扫描 MAC 条码…", Color.DodgerBlue);
                     if (!fromCamera) txtScan.Focus();
                     return ScanFeed.Partial;
@@ -4485,11 +4661,6 @@ namespace LabelPrinterApp
             {
                 if (_scanState == ScanState.AwaitSN)
                 {
-                    if (QRParser.NormalizeMac(s) != null)
-                    {
-                        SetStatus("这是 MAC，请先扫 SN 条码", Color.Red);
-                        return ScanFeed.Ignored;
-                    }
                     DropStaleMacForNewSn(s);
                     txtSN.Text = s;
                     _scanState = ScanState.AwaitMAC;
@@ -4526,7 +4697,8 @@ namespace LabelPrinterApp
                 {
                     // 不是二维码：有些标签**根本没有大二维码**，只有 SN / MAC 两个条码。
                     // 这时把第一段当成 SN 收下：型号优先用历史记录反查（同批设备），查不到就提示手填。
-                    bool looksSn = QRParser.NormalizeMac(s) == null && WinOcr.LooksLikeSn(s);
+                    // 12 位数字/字母码可能是 SN 也可能是 MAC，先收下；1.5 秒仍无第二段时再查表并按表结果纠正。
+                    bool looksSn = WinOcr.LooksLikeSn(s);
                     if (looksSn)
                     {
                         DropStaleMacForNewSn(s);
@@ -5052,6 +5224,63 @@ namespace LabelPrinterApp
                      + "③ 取消锁定后再打印：" + third + " → " + (unlockedCleared ? "恢复清空 PASS" : "FAIL") + "\r\n"
                      + "历史新增=" + (_records.Count - before) + "（应为 2）\r\n"
                      + "结果=" + (pass ? "PASS" : "FAIL");
+            }
+            catch (Exception ex) { return "ERR " + ex; }
+        }
+
+        internal string TestExternalSingleCode(string code)
+        {
+            try
+            {
+                bool oldAuto = chkAuto.Checked;
+                bool oldTest = ShellApp.Globals.TestMode;
+                ShellApp.Globals.TestMode = true;
+                chkAuto.Checked = false;
+                SetMode(false);
+                ClearInputs(false);
+                ProcessScanText(code, false);
+                string immediate = TestInputs();
+                for (int i = 0; i < 220; i++)
+                {
+                    Application.DoEvents();
+                    System.Threading.Thread.Sleep(10);
+                }
+                string result = "立即=" + immediate + " | 1.5秒后=" + TestInputs()
+                              + " | 状态=" + TestStatusText();
+                chkAuto.Checked = oldAuto;
+                ShellApp.Globals.TestMode = oldTest;
+                return result;
+            }
+            catch (Exception ex) { return "ERR " + ex; }
+        }
+
+        internal string TestExternalAutoSequence(string sn, string mac)
+        {
+            try
+            {
+                bool oldAuto = chkAuto.Checked;
+                bool oldTest = ShellApp.Globals.TestMode;
+                ShellApp.Globals.TestMode = true;
+                chkAuto.Checked = true;
+                chkModel.Checked = true; chkType.Checked = true;
+                chkSN.Checked = true; chkMAC.Checked = true;
+                SetMode(false);
+                ClearInputs(false);
+                int before = _records.Count;
+                ProcessScanText(sn, false);
+                System.Threading.Thread.Sleep(150);
+                ProcessScanText(mac, false);
+                for (int i = 0; i < 260; i++)
+                {
+                    Application.DoEvents();
+                    System.Threading.Thread.Sleep(10);
+                }
+                int delta = _records.Count - before;
+                string result = "两段扫码：历史新增=" + delta + "（应为1）；输入=" + TestInputs()
+                              + "；状态=" + TestStatusText();
+                chkAuto.Checked = oldAuto;
+                ShellApp.Globals.TestMode = oldTest;
+                return result;
             }
             catch (Exception ex) { return "ERR " + ex; }
         }
@@ -5631,6 +5860,7 @@ namespace LabelPrinterApp
 
         private void ClearInputs(bool keepModelType)
         {
+            StopExternalLookupDelay();
             if (!_fixedModel && !keepModelType)
             {
                 txtModel.Text = "";
