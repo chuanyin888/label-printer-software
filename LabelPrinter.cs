@@ -840,8 +840,8 @@ namespace LabelPrinterApp
         {
             switch (it.Id)
             {
-                case "model_text": return "型号：" + (placeholder && string.IsNullOrEmpty(r.Model) ? "ZXHN F677V2" : r.Model);
-                case "type_text": return "类型：" + (placeholder && string.IsNullOrEmpty(r.Type) ? "GPON" : r.Type);
+                case "model_text": return "型号：" + (placeholder && string.IsNullOrEmpty(r.Model) ? "请填写型号" : r.Model);
+                case "type_text": return "类型：" + (placeholder && string.IsNullOrEmpty(r.Type) ? "请选择类型" : r.Type);
                 case "sn_text": return "SN：" + (placeholder && string.IsNullOrEmpty(r.SN) ? "SN12345678901" : r.SN);
                 case "mac_text": return "MAC：" + (placeholder && string.IsNullOrEmpty(r.MAC) ? "1234567890AB" : r.MAC);
             }
@@ -1340,7 +1340,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.14";
+        public const string AppVersion = "2.3.15";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
