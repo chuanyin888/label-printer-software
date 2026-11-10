@@ -73,6 +73,7 @@ namespace LabelPrinterApp
             if (ex == null) return "";
             string body = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" +
                           ex.GetType().FullName + ": " + ex.Message + "\r\n" + ex.StackTrace;
+            try { ShellApp.AppLog.Write("错误", ex.GetType().FullName + ": " + ex.Message + "\r\n" + ex.StackTrace); } catch { }
             string path = "";
             try
             {
@@ -1339,7 +1340,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.13";
+        public const string AppVersion = "2.3.14";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -4203,22 +4204,31 @@ namespace LabelPrinterApp
             try
             {
                 if (ShellApp.Globals.TestHarness) return;           // 只有命令行自测才跳过；"测试模式"勾选不影响扫码伴侣
-                if (_companion == null) _companion = new ScannerCompanion(Application.StartupPath);
+                if (_companion == null)
+                {
+                    _companion = new ScannerCompanion(Application.StartupPath);
+                    _companion.Line += OnCompanionLine;              // 先订阅，启动阶段的环境/相机日志也不会漏
+                }
                 if (_companion.Running) return;
                 string err;
                 if (_companion.Start(CompanionTemplate, out err))
                 {
-                    _companion.Line += OnCompanionLine;              // 它的日志 → 显示在工具里
                     _compPaused = true;
                     _compStarted = false;
                     SetStatus("扫码伴侣已就绪（它用摄像头识别；点「开始识别」开始干活）", Color.DodgerBlue);
+                    ShellApp.AppLog.Write("扫码伴侣", "启动成功：" + CompanionTemplate);
                 }
                 else
                 {
                     SetStatus("扫码伴侣没能启动：" + err, Color.Red);
+                    ShellApp.AppLog.Write("扫码伴侣", "启动失败：" + err);
                 }
             }
-            catch (Exception ex) { SetStatus("启动扫码伴侣出错：" + ex.Message, Color.Red); }
+            catch (Exception ex)
+            {
+                SetStatus("启动扫码伴侣出错：" + ex.Message, Color.Red);
+                ShellApp.AppLog.Write("扫码伴侣", "启动异常：" + ex.Message);
+            }
         }
 
         /// <summary>把一行提示显示到「扫码伴侣日志」面板（辅助安装/环境检查的进度也走这里，工人看得见）</summary>
@@ -4232,14 +4242,16 @@ namespace LabelPrinterApp
         {
             try
             {
+                string show = System.Text.RegularExpressions.Regex.Replace(
+                    line ?? "", "\x1B\\[[0-9;]*[A-Za-z]", "");
+                if (show.Trim().Length > 0)
+                    ShellApp.AppLog.Write("扫码伴侣", show);
                 if (IsDisposed || !IsHandleCreated) return;
                 BeginInvoke((MethodInvoker)delegate
                 {
                     try
                     {
                         // 有些版本会带 ANSI 颜色码（?[90m 之类），去掉再显示，日志才干净
-                        string show = System.Text.RegularExpressions.Regex.Replace(
-                            line ?? "", "\x1B\\[[0-9;]*[A-Za-z]", "");
                         if (show.Trim().Length == 0) return;
                         if (_txtScannerLog == null) return;
                         if (_grpScannerLog != null && !_grpScannerLog.Visible) _grpScannerLog.Visible = true;
@@ -4427,6 +4439,8 @@ namespace LabelPrinterApp
                 if (pq != null && (!string.IsNullOrEmpty(pq.SN) || !string.IsNullOrEmpty(pq.Model) || !string.IsNullOrEmpty(pq.Type)))
                 {
                     if (WinOcr.HasBadTech(s + " " + pq.Model)) { EponAlerted("二维码"); return ScanFeed.Ignored; }
+                    ShellApp.AppLog.Write("识别", "读取设备二维码：型号=" + (pq.Type ?? "") +
+                                                 "，类型=" + (pq.Model ?? "") + "，SN=" + (pq.SN ?? ""));
                     DropStaleMacForNewSn(pq.SN);
                     _lastRawQR = s;
                     ApplyScannedModelType(pq.Type, pq.Model);
@@ -4520,7 +4534,8 @@ namespace LabelPrinterApp
                         _lastRawQR = "";
                         _pendingSnNoModel = false;
                         string m2, t2;
-                        if (GuessModelFromHistory(s, out m2, out t2) && !string.IsNullOrEmpty(m2))
+                        bool guessed = GuessModelFromHistory(s, out m2, out t2) && !string.IsNullOrEmpty(m2);
+                        if (guessed)
                         {
                             ApplyScannedModelType(m2, t2);
                             _scanState = ScanState.AwaitMAC;
@@ -4546,6 +4561,10 @@ namespace LabelPrinterApp
                                     Color.DarkOrange);
                             }
                         }
+                        ShellApp.AppLog.Write("识别", "无二维码：SN=" + s.Trim()
+                            + "；历史反查=" + (guessed ? (m2 + " / " + t2) : "未命中（不再使用4/6位短前缀猜测）")
+                            + "；当前型号=" + (txtModel.Text ?? "").Trim()
+                            + "；类型=" + (txtType.Text ?? "").Trim());
                         if (!fromCamera) txtScan.Focus();
                         return ScanFeed.Partial;
                     }
@@ -4553,6 +4572,8 @@ namespace LabelPrinterApp
                     return ScanFeed.Ignored;
                 }
                 DropStaleMacForNewSn(p.SN);
+                ShellApp.AppLog.Write("识别", "读取设备二维码：型号=" + (p.Type ?? "") +
+                                             "，类型=" + (p.Model ?? "") + "，SN=" + (p.SN ?? ""));
                 _lastRawQR = s;
                 ApplyScannedModelType(p.Type, p.Model);
                 txtSN.Text = p.SN;
@@ -4630,6 +4651,12 @@ namespace LabelPrinterApp
 
             rec.PrintTime = DateTime.Now;
             bool dup = AddRecord(rec);
+            ShellApp.AppLog.Write("打印", (testMode ? "测试模式" : "正式打印")
+                                         + "：型号=" + (rec.Model ?? "")
+                                         + "，类型=" + (rec.Type ?? "")
+                                         + "，SN=" + (rec.SN ?? "")
+                                         + "，MAC=" + (rec.MAC ?? "")
+                                         + (dup ? "（历史中已存在）" : ""));
             _lastPrintSn = rec.SN ?? "";
             _lastPrintMac = rec.MAC ?? "";
             _lastPrintAt = DateTime.Now;
@@ -4766,31 +4793,123 @@ namespace LabelPrinterApp
             catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
-        // 没有二维码时：用 SN 去历史记录里反查“型号 / 类型”（先精确后前缀），典型现场是同一批型号
-        internal bool GuessModelFromHistory(string sn, out string model, out string type)
+        private static int CommonSnPrefixLength(string a, string b)
+        {
+            int n = 0;
+            int max = Math.Min((a ?? "").Length, (b ?? "").Length);
+            while (n < max && char.ToUpperInvariant(a[n]) == char.ToUpperInvariant(b[n])) n++;
+            return n;
+        }
+
+        // 没有二维码时按历史记录反查型号：
+        // ① SN 完全相同 → 直接命中；
+        // ② 同型号至少出现过 2 次，且 SN 公共前缀至少 10 位 → 才认为同一批。
+        //    旧版只用 4/6 位前缀，ZTEG 前缀会把 F657GV9 误判成以前录过的 F677V2。
+        internal static bool GuessModelFromRecords(string sn, IEnumerable<DeviceRecord> records,
+                                                   out string model, out string type)
         {
             model = ""; type = "";
             try
             {
-                if (string.IsNullOrWhiteSpace(sn)) return false;
+                if (string.IsNullOrWhiteSpace(sn) || records == null) return false;
                 string s = sn.Trim().ToUpperInvariant();
-                foreach (var r in _records)
+                var list = new List<DeviceRecord>();
+                foreach (var r in records) if (r != null) list.Add(r);
+
+                foreach (var r in list)
                 {
-                    if (!string.IsNullOrEmpty(r.SN) && r.SN.Trim().ToUpperInvariant() == s && !string.IsNullOrEmpty(r.Model))
-                    { model = r.Model; type = r.Type; return true; }
+                    if (!string.IsNullOrEmpty(r.SN) && r.SN.Trim().ToUpperInvariant() == s &&
+                        !string.IsNullOrEmpty(r.Model))
+                    {
+                        model = r.Model;
+                        type = r.Type ?? "";
+                        return true;
+                    }
                 }
-                string p6 = s.Length >= 6 ? s.Substring(0, 6) : s;
-                string p4 = s.Length >= 4 ? s.Substring(0, 4) : s;
-                foreach (var r in _records)
+
+                var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var maxPrefix = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var types = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var displays = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var order = new List<string>();
+                foreach (var r in list)
                 {
                     if (string.IsNullOrEmpty(r.SN) || string.IsNullOrEmpty(r.Model)) continue;
+                    string key = r.Model.Trim();
+                    if (key.Length == 0) continue;
                     string rs = r.SN.Trim().ToUpperInvariant();
-                    if ((p6.Length >= 4 && rs.StartsWith(p6)) || (p4.Length >= 4 && rs.StartsWith(p4)))
-                    { model = r.Model; type = r.Type; return true; }
+                    int common = CommonSnPrefixLength(s, rs);
+                    if (common < 10) continue;
+                    int c;
+                    counts.TryGetValue(key, out c);
+                    if (c == 0)
+                    {
+                        order.Add(key);
+                        displays[key] = key;
+                        types[key] = r.Type ?? "";
+                    }
+                    counts[key] = c + 1;
+                    int mp;
+                    maxPrefix.TryGetValue(key, out mp);
+                    if (common > mp) maxPrefix[key] = common;
                 }
+
+                string best = null;
+                int bestPrefix = 0;
+                foreach (string key in order)
+                {
+                    int c, mp;
+                    counts.TryGetValue(key, out c);
+                    maxPrefix.TryGetValue(key, out mp);
+                    if (c < 2 || mp < 10) continue;
+                    if (best == null || mp > bestPrefix)
+                    {
+                        best = key;
+                        bestPrefix = mp;
+                    }
+                }
+                if (best == null) return false;
+                model = displays.ContainsKey(best) ? displays[best] : best;
+                type = types.ContainsKey(best) ? types[best] : "";
+                return true;
             }
-            catch { }
-            return false;
+            catch { return false; }
+        }
+
+        internal bool GuessModelFromHistory(string sn, out string model, out string type)
+        {
+            return GuessModelFromRecords(sn, _records, out model, out type);
+        }
+
+        internal static string TestModelGuessSafety()
+        {
+            var list = new List<DeviceRecord>();
+            list.Add(new DeviceRecord { SN = "ZTEGD2000001", Model = "ZXHN F677V2", Type = "GPON" });
+            string m, t;
+            bool shortPrefixRejected = !GuessModelFromRecords("ZTEGD2665A7B", list, out m, out t);
+            string shortResult = m + "/" + t;
+
+            list.Add(new DeviceRecord { SN = "ZTEGD2665A7B", Model = "ZXHN F657GV9", Type = "GPON" });
+            bool exactOk = GuessModelFromRecords("ZTEGD2665A7B", list, out m, out t)
+                           && m == "ZXHN F657GV9";
+            string exactResult = m + "/" + t;
+
+            var batch = new List<DeviceRecord>();
+            batch.Add(new DeviceRecord { SN = "SCTY6E587A01", Model = "TEWA-802G", Type = "GPON" });
+            batch.Add(new DeviceRecord { SN = "SCTY6E587A02", Model = "TEWA-802G", Type = "GPON" });
+            bool longPrefixOk = GuessModelFromRecords("SCTY6E587A03", batch, out m, out t)
+                                && m == "TEWA-802G";
+            string prefixResult = m + "/" + t;
+
+            var one = new List<DeviceRecord>();
+            one.Add(new DeviceRecord { SN = "SCTY6E587A01", Model = "TEWA-802G", Type = "GPON" });
+            bool oneRecordRejected = !GuessModelFromRecords("SCTY6E587A02", one, out m, out t);
+            bool pass = shortPrefixRejected && exactOk && longPrefixOk && oneRecordRejected;
+            return "① ZTEG 6位短前缀不再猜型号：" + shortPrefixRejected + "（结果=" + shortResult + "）\r\n"
+                 + "② SN 完全相同可命中：" + exactOk + "（" + exactResult + "）\r\n"
+                 + "③ 同型号≥2条且公共前缀10位可命中：" + longPrefixOk + "（" + prefixResult + "）\r\n"
+                 + "④ 只有1条历史时不冒险猜：" + oneRecordRejected + "\r\n"
+                 + "结果=" + (pass ? "PASS" : "FAIL");
         }
 
         // 摄像头模式专用：没扫到二维码时，用 SN 条码反查型号并直接进入“等 MAC”状态
