@@ -864,7 +864,7 @@ namespace LabelPrinterApp
         public static string PlaceholderBarcode(LayoutItem it)
         {
             if (it.Id == "sn_barcode") return "SN12345678901";
-            if (it.Id == "stbid_barcode") return "00000451001921D02401FC386A85DA31";
+            if (it.Id == "stbid_barcode") return "";
             return "1234567890AB";
         }
 
@@ -875,7 +875,11 @@ namespace LabelPrinterApp
                 case "model_text": return "型号：" + (placeholder && string.IsNullOrEmpty(r.Model) ? "请填写型号" : r.Model);
                 case "type_text": return "类型：" + (placeholder && string.IsNullOrEmpty(r.Type) ? "请选择类型" : r.Type);
                 case "sn_text": return "SN：" + (placeholder && string.IsNullOrEmpty(r.SN) ? "SN12345678901" : r.SN);
-                case "stbid_text": return "STBID：" + (placeholder && string.IsNullOrEmpty(r.STBID) ? "00000451001921D02401FC386A85DA31" : r.STBID);
+                case "stbid_text":
+                    if (placeholder && string.IsNullOrEmpty(r.STBID) &&
+                        string.Equals((r.Type ?? "").Trim(), "机顶盒", StringComparison.OrdinalIgnoreCase))
+                        return "STBID：未读取";
+                    return "STBID：" + r.STBID;
                 case "mac_text": return "MAC：" + (placeholder && string.IsNullOrEmpty(r.MAC) ? "1234567890AB" : r.MAC);
             }
             return "";
@@ -1048,16 +1052,27 @@ namespace LabelPrinterApp
                 if (stbBar != null && macBar != null)
                 {
                     string stbData = BarcodeDataFor(stbBar, r);
-                    if (placeholder && string.IsNullOrEmpty(stbData)) stbData = PlaceholderBarcode(stbBar);
-                    int stbMaxW = wPx - MmToPx(4, dpi) * 2;
-                    if (stbBar.MaxWidthMm > 0)
-                        stbMaxW = Math.Min(stbMaxW, MmToPx(stbBar.MaxWidthMm, dpi));
-                    int modules = Math.Max(1, Code128.ModuleCount(stbData));
-                    int commonModuleW = Math.Max(1, Math.Min(3, Math.Max(1, stbMaxW) / modules));
-                    stbBar.ModuleWidthPx = commonModuleW;
-                    // MAC 内容短，使用略粗的模块宽度，避免打印出来过短、过细；
-                    // 码制仍是 Code128，长度也不会被强行拉成和 STBID 一样。
-                    macBar.ModuleWidthPx = Math.Min(3, commonModuleW + 1);
+                    bool stbIdPending = string.IsNullOrEmpty(stbData) &&
+                                        string.Equals((r.Type ?? "").Trim(), "机顶盒", StringComparison.OrdinalIgnoreCase);
+                    if (placeholder && string.IsNullOrEmpty(stbData) && !stbIdPending) stbData = PlaceholderBarcode(stbBar);
+                    if (string.IsNullOrEmpty(stbData))
+                    {
+                        // STBID 还没读到：不能拿不存在的 STBID 宽度给 MAC 做参照，否则 MAC 会被推偏。
+                        stbBar.ModuleWidthPx = 0;
+                        macBar.ModuleWidthPx = 0;
+                    }
+                    else
+                    {
+                        int stbMaxW = wPx - MmToPx(4, dpi) * 2;
+                        if (stbBar.MaxWidthMm > 0)
+                            stbMaxW = Math.Min(stbMaxW, MmToPx(stbBar.MaxWidthMm, dpi));
+                        int modules = Math.Max(1, Code128.ModuleCount(stbData));
+                        int commonModuleW = Math.Max(1, Math.Min(3, Math.Max(1, stbMaxW) / modules));
+                        stbBar.ModuleWidthPx = commonModuleW;
+                        // MAC 内容短，使用略粗的模块宽度，避免打印出来过短、过细；
+                        // 码制仍是 Code128，长度也不会被强行拉成和 STBID 一样。
+                        macBar.ModuleWidthPx = Math.Min(3, commonModuleW + 1);
+                    }
                 }
 
                 foreach (var it in items)
@@ -1066,6 +1081,9 @@ namespace LabelPrinterApp
                     if (it.IsBarcode)
                     {
                         string data = BarcodeDataFor(it, r);
+                        bool pendingStbId = it.Id == "stbid_barcode" && string.IsNullOrEmpty(data) &&
+                                            string.Equals((r.Type ?? "").Trim(), "机顶盒", StringComparison.OrdinalIgnoreCase);
+                        if (pendingStbId) continue;
                         if (placeholder && string.IsNullOrEmpty(data)) data = PlaceholderBarcode(it);
                         if (string.IsNullOrEmpty(data)) continue;
                         int maxW = wPx - MmToPx(4, dpi) * 2;
@@ -1418,7 +1436,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.20";
+        public const string AppVersion = "2.3.21";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2521,7 +2539,7 @@ namespace LabelPrinterApp
                              + " --start-paused"
                              + " --parent-pid " + Process.GetCurrentProcess().Id.ToString()
                              + " --title \"光猫扫码伴侣（一体化工具调用）\""
-                             + ShellApp.ScannerFocusSettings.ExtraArgs();   // 设置里勾了"固定对焦"就带上 --focus xx --no-adapt
+                             + ShellApp.ScannerFocusSettings.ExtraArgs(deviceKind);
                 psi.WorkingDirectory = Path.GetDirectoryName(_script);
                 psi.UseShellExecute = false;
                 // 不要控制台窗口：日志直接读进工具里显示（现代 Windows 的控制台属于 conhost，
@@ -2780,29 +2798,55 @@ namespace LabelPrinterApp
             {
                 string sn = (txtSN.Text ?? "").Trim();
                 string mac = (txtMAC.Text ?? "").Trim();
-                if (sn.Length == 0 && mac.Length == 0) return false;
+                string stbId = (txtSTBID.Text ?? "").Trim();
 
-                // 机顶盒只以 MAC 为准：只查 MAC，不回填 SN，也不采用数据源里的制式。
+                // 机顶盒：STBID / MAC 任意一项即可查表，立即补齐另一项和型号。
                 if (_deviceKindStb)
                 {
-                    if (mac.Length == 0) return false;
-                    var stbHit = ShellApp.ExternalDeviceLookup.Find(null, mac);
+                    if (stbId.Length == 0 && mac.Length == 0) return false;
+                    var stbHit = ShellApp.ExternalDeviceLookup.FindStb(stbId, mac);
                     if (stbHit == null) return false;
                     string stbOldModel = (txtModel.Text ?? "").Trim();
                     string stbOldType = (txtType.Text ?? "").Trim();
+                    string stbOldId = stbId;
+                    string stbOldMac = mac;
+                    if (string.IsNullOrWhiteSpace(stbId) && !string.IsNullOrWhiteSpace(stbHit.StbId))
+                        txtSTBID.Text = stbHit.StbId.Trim();
+                    if (string.IsNullOrWhiteSpace(mac) && !string.IsNullOrWhiteSpace(stbHit.Mac))
+                    {
+                        txtMAC.Text = stbHit.Mac.Trim();
+                        _macDirty = true;
+                    }
+                    // STBID 后缀就是 MAC 时，即使数据源没有单独 STBID 列，也能从 STBID 得 MAC。
+                    if (string.IsNullOrWhiteSpace(txtMAC.Text) && stbId.Length >= 12)
+                    {
+                        string suffixMac = QRParser.NormalizeMac(stbId.Substring(stbId.Length - 12));
+                        if (!string.IsNullOrEmpty(suffixMac))
+                        {
+                            txtMAC.Text = suffixMac.ToUpperInvariant();
+                            _macDirty = true;
+                        }
+                    }
                     if (!string.IsNullOrWhiteSpace(stbHit.Model)) txtModel.Text = stbHit.Model.Trim();
                     txtType.Text = "机顶盒";
                     bool stbChanged = !string.Equals(stbOldModel, (txtModel.Text ?? "").Trim(), StringComparison.Ordinal)
-                                   || !string.Equals(stbOldType, (txtType.Text ?? "").Trim(), StringComparison.Ordinal);
+                                   || !string.Equals(stbOldType, (txtType.Text ?? "").Trim(), StringComparison.Ordinal)
+                                   || !string.Equals(stbOldId, (txtSTBID.Text ?? "").Trim(), StringComparison.Ordinal)
+                                   || !string.Equals(stbOldMac, (txtMAC.Text ?? "").Trim(), StringComparison.Ordinal);
                     if (stbChanged)
                     {
-                        string msg = "机顶盒 MAC 已从" + stbHit.Source + "表匹配型号：" + (txtModel.Text ?? "").Trim()
-                                   + "，类型=机顶盒，MAC=" + mac;
+                        string nowStb = (txtSTBID.Text ?? "").Trim();
+                        string nowMac = (txtMAC.Text ?? "").Trim();
+                        string msg = "机顶盒已从" + stbHit.Source + "表匹配：型号=" + (txtModel.Text ?? "").Trim()
+                                   + "，STBID=" + (nowStb.Length > 0 ? nowStb : "-")
+                                   + "，MAC=" + (nowMac.Length > 0 ? nowMac : "-");
                         SetStatus(msg, Color.SeaGreen);
                         ShellApp.AppLog.Write("机顶盒", msg + "；匹配=" + stbHit.MatchedBy);
                     }
                     return stbChanged;
                 }
+
+                if (sn.Length == 0 && mac.Length == 0) return false;
 
                 var hit = ShellApp.ExternalDeviceLookup.Find(sn, mac);
                 // 12 位码可能是 SN 也可能是 MAC：等超时后再尝试另一种解释。
@@ -2880,7 +2924,8 @@ namespace LabelPrinterApp
         }
 
         /// <summary>
-        /// 不在扫描第一段就查表。等界面 1.5 秒没有新的扫码输入、且数据仍不完整时，
+        /// 机顶盒：任一字段到达就立即查表，不走计时器。
+        /// ONU：第一段先不查；等界面 1.5 秒没有新的扫码输入、且数据仍不完整时，
         /// 才认为“确实识别不出来”，这时再查入库（优先）和检测。
         /// </summary>
         private void ScheduleExternalLookupIfNeeded(string reason)
@@ -2888,7 +2933,29 @@ namespace LabelPrinterApp
             try
             {
                 if (_externalFilling) return;
-                if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text))
+                if (_deviceKindStb)
+                {
+                    // 机顶盒必须依赖入库/检测补全，不做 1.5 秒等待。
+                    StopExternalLookupDelay();
+                    if (string.IsNullOrWhiteSpace(txtSTBID.Text) && string.IsNullOrWhiteSpace(txtMAC.Text)) return;
+                    bool stbChanged = FillMissingFromExternalTables(reason);
+                    if (stbChanged && string.IsNullOrEmpty(ValidateForPrint()) && chkAuto != null && chkAuto.Checked)
+                    {
+                        SetStatus("入库/检测已补齐机顶盒数据，正在打印…", Color.SeaGreen);
+                        SaveAndPrint(true);
+                    }
+                    else if (stbChanged)
+                    {
+                        SetStatus("入库/检测已补全部分机顶盒信息，仍需补齐 STBID 或 MAC", Color.DarkOrange);
+                    }
+                    else if (!string.IsNullOrEmpty(ValidateForPrint()))
+                    {
+                        SetStatus("入库/检测未找到对应机顶盒，请继续扫描 STBID 或 MAC", Color.DarkOrange);
+                    }
+                    return;
+                }
+                if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text) &&
+                    string.IsNullOrWhiteSpace(txtSTBID.Text))
                 {
                     StopExternalLookupDelay();
                     return;
@@ -2907,7 +2974,8 @@ namespace LabelPrinterApp
                         {
                             _externalLookupTimer.Stop();
                             if (_externalFilling) return;
-                            if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text)) return;
+                            if (string.IsNullOrWhiteSpace(txtSN.Text) && string.IsNullOrWhiteSpace(txtMAC.Text) &&
+                                string.IsNullOrWhiteSpace(txtSTBID.Text)) return;
                             if (string.IsNullOrEmpty(ValidateForPrint())) return;
 
                             bool changed = FillMissingFromExternalTables("识别等待1.5秒后仍不完整");
@@ -4820,7 +4888,13 @@ namespace LabelPrinterApp
         {
             StopExternalLookupDelay();   // 新输入到达：之前的“识别失败”等待作废
             ScanFeed res = ProcessScanTextCore(input, fromCamera);
-            if (res != ScanFeed.Ignored) ScheduleExternalLookupIfNeeded("扫码输入完成");
+            if (res != ScanFeed.Ignored)
+            {
+                ScheduleExternalLookupIfNeeded("扫码输入完成");
+                if (_deviceKindStb && string.IsNullOrEmpty(ValidateForPrint())
+                    && (!string.IsNullOrWhiteSpace(txtSTBID.Text) || !string.IsNullOrWhiteSpace(txtMAC.Text)))
+                    res = ScanFeed.Completed;
+            }
             return res;
         }
 
@@ -6414,8 +6488,7 @@ namespace LabelPrinterApp
                     _scanState = ScanState.AwaitSTBID;
                     lblStep.Text = "第 1 步：扫描 STBID\n第 2 步：扫描 MAC 条码";
                     SetStatus("机顶盒模式：请先扫描 STBID…（型号从入库/检测匹配）", Color.DodgerBlue);
-                    if (_companion != null && _companion.Running) _companion.Send("mode=stb");
-                    ShellApp.AppLog.Write("识别", "切换录入类型：机顶盒（仅 MAC）");
+                    ShellApp.AppLog.Write("识别", "切换录入类型：机顶盒（STBID + MAC）");
                 }
                 else
                 {
@@ -6438,6 +6511,19 @@ namespace LabelPrinterApp
                     txtType.Text = "";
                     SetMode(_onuModeIndex == 1);
                     ShellApp.AppLog.Write("识别", "切换录入类型：ONU 光猫设备");
+                }
+                // 两类设备使用不同的对焦配置，切换时必须重启扫码伴侣让新焦距生效。
+                if (_companion != null && _companion.Running)
+                {
+                    bool wasActive = _compStarted && !_compPaused;
+                    RestartCompanion();
+                    if (wasActive && _companion != null && _companion.Running)
+                    {
+                        _companion.Send("resume");
+                        _compStarted = true;
+                        _compPaused = false;
+                        UpdateScannerUi();
+                    }
                 }
                 txtScan.Focus();
                 UpdatePreview();
