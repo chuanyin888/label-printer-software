@@ -1316,7 +1316,7 @@ namespace LabelPrinterApp
             list = new List<DeviceRecord>();
             if (!File.Exists(_path)) return true;   // 不存在 = 空，属于正常情况
             string[] lines;
-            try { lines = File.ReadAllLines(_path, Encoding.UTF8); }
+            try { lines = ReadAllLinesShared(); }
             catch { return false; }
             for (int i = 1; i < lines.Length; i++)
             {
@@ -1349,7 +1349,7 @@ namespace LabelPrinterApp
             var list = new List<DeviceRecord>();
             if (!File.Exists(_path)) return list;
             string[] lines = null;
-            try { lines = File.ReadAllLines(_path, Encoding.UTF8); }
+            try { lines = ReadAllLinesShared(); }
             catch { return list; }
             // 逐行解析：某一条数据格式异常只跳过该条，不拖垮整份历史文件（避免今日计数被清空）
             for (int i = 1; i < lines.Length; i++)
@@ -1376,6 +1376,34 @@ namespace LabelPrinterApp
                 catch { }
             }
             return list;
+        }
+
+        // 历史文件可能正被 NAS 同步/Excel 短暂占用。允许读写共享，并做 3 次短重试，
+        // 避免装箱页偶发把整份当天历史当成“不存在”，导致导入为空、扫一次不自动配另一半。
+        private string[] ReadAllLinesShared()
+        {
+            Exception last = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using (var fs = new FileStream(_path, FileMode.Open, FileAccess.Read,
+                                                   FileShare.ReadWrite | FileShare.Delete))
+                    using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+                    {
+                        var lines = new List<string>();
+                        string line;
+                        while ((line = sr.ReadLine()) != null) lines.Add(line);
+                        return lines.ToArray();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    if (attempt < 2) System.Threading.Thread.Sleep(40 * (attempt + 1));
+                }
+            }
+            throw last ?? new IOException("历史文件读取失败");
         }
 
         public void Save(List<DeviceRecord> list)
@@ -1436,7 +1464,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.21";
+        public const string AppVersion = "2.3.22";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2677,6 +2705,12 @@ namespace LabelPrinterApp
         private Timer _refreshTimer;
         private Timer _externalLookupTimer;
         private bool _externalFilling;
+        // 程序化改输入框时屏蔽 TextChanged 自动查表；防止清空/补全过程中用半旧字段再次自动打印。
+        private int _fieldEventDepth;
+        private bool _printInProgress;
+        // 最近一次“自动打印”的设备指纹：即使历史列表被 NAS 刷新，也能拦住同一台的幽灵重打。
+        private string _lastAutoPrintKey = "";
+        private DateTime _lastAutoPrintAt = DateTime.MinValue;
         // NAS 备份同步
         private TextBox txtNasPath;
         private RadioButton radNasOn, radNasOff;
@@ -2694,6 +2728,31 @@ namespace LabelPrinterApp
         // 用途：输入框里会保留上一台的内容，只有"新扫进来的 MAC"才能让二维码补扫时立刻打印，
         // 否则会拿上一台的 MAC 打出错标签。
         private bool _macDirty;
+
+        private void BeginFieldEventScope() { _fieldEventDepth++; }
+        private void EndFieldEventScope() { if (_fieldEventDepth > 0) _fieldEventDepth--; }
+        private bool FieldEventsSuppressed
+        {
+            get { return _fieldEventDepth > 0 || _externalFilling || _printInProgress; }
+        }
+
+        private static string AutoPrintKey(DeviceRecord rec)
+        {
+            if (rec == null) return "";
+            if (IsStbRecord(rec))
+                return "STB|" + (rec.STBID ?? "").Trim().ToUpperInvariant()
+                     + "|" + (rec.MAC ?? "").Trim().ToUpperInvariant();
+            return "ONU|" + (rec.SN ?? "").Trim().ToUpperInvariant()
+                 + "|" + (rec.MAC ?? "").Trim().ToUpperInvariant();
+        }
+
+        private bool IsRecentAutoPrint(DeviceRecord rec)
+        {
+            string key = AutoPrintKey(rec);
+            return key.Length > 3
+                && string.Equals(key, _lastAutoPrintKey, StringComparison.OrdinalIgnoreCase)
+                && (DateTime.Now - _lastAutoPrintAt).TotalMinutes < 2;
+        }
 
         private bool JustPrinted(string sn, string mac)
         {
@@ -2842,6 +2901,7 @@ namespace LabelPrinterApp
                                    + "，MAC=" + (nowMac.Length > 0 ? nowMac : "-");
                         SetStatus(msg, Color.SeaGreen);
                         ShellApp.AppLog.Write("机顶盒", msg + "；匹配=" + stbHit.MatchedBy);
+                        UpdatePreview();
                     }
                     return stbChanged;
                 }
@@ -2907,6 +2967,7 @@ namespace LabelPrinterApp
                                + (corrected.Length > 0 ? "；已校正" + corrected : "");
                     SetStatus(msg, Color.SeaGreen);
                     ShellApp.AppLog.Write("外部补全", msg + "；匹配=" + hit.MatchedBy);
+                    UpdatePreview();
                 }
                 return changed;
             }
@@ -2932,7 +2993,7 @@ namespace LabelPrinterApp
         {
             try
             {
-                if (_externalFilling) return;
+                if (_externalFilling || _printInProgress || _fieldEventDepth > 0) return;
                 if (_deviceKindStb)
                 {
                     // 机顶盒必须依赖入库/检测补全，不做 1.5 秒等待。
@@ -2946,7 +3007,10 @@ namespace LabelPrinterApp
                     }
                     else if (stbChanged)
                     {
-                        SetStatus("入库/检测已补全部分机顶盒信息，仍需补齐 STBID 或 MAC", Color.DarkOrange);
+                        if (string.IsNullOrEmpty(ValidateForPrint()))
+                            SetStatus("入库/检测已补齐机顶盒数据，可直接打印当前设备", Color.SeaGreen);
+                        else
+                            SetStatus("入库/检测已补全部分机顶盒信息，仍需补齐 STBID 或 MAC", Color.DarkOrange);
                     }
                     else if (!string.IsNullOrEmpty(ValidateForPrint()))
                     {
@@ -3888,6 +3952,7 @@ namespace LabelPrinterApp
             foreach (Control tb in new Control[] { txtModel, txtType, txtSN, txtSTBID, txtMAC })
                 tb.TextChanged += (s, e) =>
                 {
+                    if (FieldEventsSuppressed) return;
                     // 没有二维码时：手动填上型号后自动继续去对齐 MAC
                     if (_pendingSnNoModel && !string.IsNullOrWhiteSpace(txtModel.Text))
                     {
@@ -4865,6 +4930,7 @@ namespace LabelPrinterApp
         {
             try
             {
+                if (_printInProgress || FieldEventsSuppressed) return;
                 if (!chkAuto.Checked) return;
                 if (string.IsNullOrWhiteSpace(txtModel.Text)) return;
                 if (_deviceKindStb)
@@ -4887,7 +4953,11 @@ namespace LabelPrinterApp
         internal ScanFeed ProcessScanText(string input, bool fromCamera)
         {
             StopExternalLookupDelay();   // 新输入到达：之前的“识别失败”等待作废
-            ScanFeed res = ProcessScanTextCore(input, fromCamera);
+            ScanFeed res;
+            BeginFieldEventScope();
+            try { res = ProcessScanTextCore(input, fromCamera); }
+            finally { EndFieldEventScope(); }
+            UpdatePreview();
             if (res != ScanFeed.Ignored)
             {
                 ScheduleExternalLookupIfNeeded("扫码输入完成");
@@ -5252,6 +5322,20 @@ namespace LabelPrinterApp
 
         private void SaveAndPrint(bool clearAfter)
         {
+            if (_printInProgress) return;
+            _printInProgress = true;
+            try { SaveAndPrintCore(clearAfter); }
+            catch (Exception ex)
+            {
+                _macDirty = false;
+                ShellApp.AppLog.Write("打印", "自动/手动打印异常：" + ex);
+                try { Notify("打印异常，已停止本次操作：" + ex.Message, Color.Red, true); } catch { }
+            }
+            finally { _printInProgress = false; }
+        }
+
+        private void SaveAndPrintCore(bool clearAfter)
+        {
             var rec = CurrentRecord();
             string verr = ValidateForPrint();
             if (verr != null)
@@ -5263,6 +5347,15 @@ namespace LabelPrinterApp
                 if (_deviceKindStb || (!string.IsNullOrWhiteSpace(txtSN.Text) && !string.IsNullOrWhiteSpace(txtMAC.Text)))
                     ResetScanStateForMode();
                 Notify(verr, Color.Red, true);
+                return;
+            }
+            // 自动打印只允许同一台出现一次。清空输入或 NAS 刷新列表时，
+            // 即使旧字段又被短暂补回，也不能再次出纸。
+            if (clearAfter && IsRecentAutoPrint(rec))
+            {
+                _macDirty = false;
+                ClearInputs();
+                SetStatus("这台刚刚已经自动打印过，已忽略重复出纸；如需补打请从历史记录重印。", Color.DarkOrange);
                 return;
             }
             // ★ 核对历史记录：这台已经录过就弹窗提示"重复录入"，不打印也不保存
@@ -5284,6 +5377,11 @@ namespace LabelPrinterApp
 
             rec.PrintTime = DateTime.Now;
             bool dup = AddRecord(rec);
+            if (clearAfter)
+            {
+                _lastAutoPrintKey = AutoPrintKey(rec);
+                _lastAutoPrintAt = DateTime.Now;
+            }
             ShellApp.AppLog.Write("打印", (testMode ? "测试模式" : "正式打印")
                                          + "：型号=" + (rec.Model ?? "")
                                          + "，类型=" + (rec.Type ?? "")
@@ -5742,8 +5840,17 @@ namespace LabelPrinterApp
                     Application.DoEvents();
                     System.Threading.Thread.Sleep(10);
                 }
-                int delta = _records.Count - before;
+                int afterAuto = _records.Count;
+                int delta = afterAuto - before;
+                ClearInputs();
+                for (int i = 0; i < 80; i++)
+                {
+                    Application.DoEvents();
+                    System.Threading.Thread.Sleep(10);
+                }
+                int afterClear = _records.Count;
                 string result = "两段扫码：历史新增=" + delta + "（应为1）；输入=" + TestInputs()
+                              + "；清空后新增=" + (afterClear - before) + "（仍应为1）"
                               + "；状态=" + TestStatusText();
                 chkAuto.Checked = oldAuto;
                 ShellApp.Globals.TestMode = oldTest;
@@ -6353,30 +6460,36 @@ namespace LabelPrinterApp
         private void ClearInputs(bool keepModelType)
         {
             StopExternalLookupDelay();
-            if (_deviceKindStb)
-            {
-                txtModel.Text = "";
-                txtType.Text = "机顶盒";
-            }
-            else if (!_fixedModel && !keepModelType)
-            {
-                txtModel.Text = "";
-                txtType.Text = "";
-            }
-            txtSN.Text = "";
-            txtSTBID.Text = "";
-            txtMAC.Text = "";
             _macDirty = false;
+            _pendingSnNoModel = false;
             _lastRawQR = "";
-            ResetScanStateForMode();
-            SetStatus(_deviceKindStb
-                ? "机顶盒模式：请扫描下一台的 STBID…"
-                : (_fixedModel
-                    ? "请扫描 SN 条码…"
-                    : (keepModelType
-                        ? "型号/类型已保留，请扫描下一台设备二维码或 SN…"
-                        : "请扫描设备二维码…")),
-                Color.DodgerBlue);
+            BeginFieldEventScope();
+            try
+            {
+                if (_deviceKindStb)
+                {
+                    txtModel.Text = "";
+                    txtType.Text = "机顶盒";
+                }
+                else if (!_fixedModel && !keepModelType)
+                {
+                    txtModel.Text = "";
+                    txtType.Text = "";
+                }
+                txtSN.Text = "";
+                txtSTBID.Text = "";
+                txtMAC.Text = "";
+                ResetScanStateForMode();
+                SetStatus(_deviceKindStb
+                    ? "机顶盒模式：请扫描下一台的 STBID…"
+                    : (_fixedModel
+                        ? "请扫描 SN 条码…"
+                        : (keepModelType
+                            ? "型号/类型已保留，请扫描下一台设备二维码或 SN…"
+                            : "请扫描设备二维码…")),
+                    Color.DodgerBlue);
+            }
+            finally { EndFieldEventScope(); }
             txtScan.Focus();
             UpdatePreview();
         }
