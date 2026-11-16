@@ -1464,7 +1464,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.24";
+        public const string AppVersion = "2.3.25";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -4519,6 +4519,25 @@ namespace LabelPrinterApp
             catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
+        internal string TestSuppressRecentAutoPrintStatus(string stbid, string mac)
+        {
+            try
+            {
+                var rec = new DeviceRecord
+                {
+                    STBID = stbid,
+                    MAC = mac,
+                    Model = "TEST-STB",
+                    Type = "机顶盒"
+                };
+                _lastAutoPrintKey = AutoPrintKey(rec);
+                _lastAutoPrintAt = DateTime.Now;
+                bool suppressed = SuppressRecentAutoPrint(rec);
+                return "已拦截=" + suppressed + " | 状态=" + TestStatusText();
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
         internal string TestStbState()
         {
             try
@@ -5351,11 +5370,8 @@ namespace LabelPrinterApp
             }
             // 自动打印只允许同一台出现一次。清空输入或 NAS 刷新列表时，
             // 即使旧字段又被短暂补回，也不能再次出纸。
-            if (clearAfter && IsRecentAutoPrint(rec))
+            if (clearAfter && SuppressRecentAutoPrint(rec))
             {
-                _macDirty = false;
-                ClearInputs();
-                SetStatus("这台刚刚已经自动打印过，已忽略重复出纸；如需补打请从历史记录重印。", Color.DarkOrange);
                 return;
             }
             // ★ 核对历史记录：这台已经录过就弹窗提示"重复录入"，不打印也不保存
@@ -6158,6 +6174,17 @@ namespace LabelPrinterApp
                 Notify("打印失败：" + ex.Message + "（请检查打印机是否开机、驱动与标签纸尺寸）", Color.Red, true);
                 return false;
             }
+        }
+
+        private bool SuppressRecentAutoPrint(DeviceRecord rec)
+        {
+            if (!IsRecentAutoPrint(rec)) return false;
+            _macDirty = false;
+            ShellApp.AppLog.Write("打印", "已忽略同一台重复自动打印事件：SN=" + (rec.SN ?? "")
+                                       + "，STBID=" + (rec.STBID ?? "")
+                                       + "，MAC=" + (rec.MAC ?? ""));
+            ClearInputs();
+            return true;
         }
 
         private DeviceRecord CurrentRecord()
