@@ -1464,7 +1464,7 @@ namespace LabelPrinterApp
 
     internal static class Updater
     {
-        public const string AppVersion = "2.3.25";
+        public const string AppVersion = "2.3.26";
         public enum UpdateCheckResult { Error, NoUpdate, UpdateAvailable }
 
         public static int CompareVersion(string a, string b)
@@ -2728,6 +2728,8 @@ namespace LabelPrinterApp
         // 用途：输入框里会保留上一台的内容，只有"新扫进来的 MAC"才能让二维码补扫时立刻打印，
         // 否则会拿上一台的 MAC 打出错标签。
         private bool _macDirty;
+        // 一台设备的扫码事务：第一段输入前整体清空，后续补扫同一台时不再重复清空。
+        private bool _deviceEntryActive;
 
         private void BeginFieldEventScope() { _fieldEventDepth++; }
         private void EndFieldEventScope() { if (_fieldEventDepth > 0) _fieldEventDepth--; }
@@ -2795,12 +2797,41 @@ namespace LabelPrinterApp
                     sameDevice = false;
                 if (sameDevice) return;
 
+                ClearDeviceValuesForNewRead();
+            }
+            catch { }
+        }
+
+        private void ClearDeviceValuesForNewRead()
+        {
+            BeginFieldEventScope();
+            try
+            {
                 if (txtSN != null) txtSN.Text = "";
+                if (txtSTBID != null) txtSTBID.Text = "";
                 if (txtMAC != null) txtMAC.Text = "";
+                if (_deviceKindStb)
+                {
+                    if (txtModel != null) txtModel.Text = "";
+                    if (txtType != null) txtType.Text = "机顶盒";
+                }
+                else if (!_fixedModel && !IsModelTypeLocked)
+                {
+                    if (txtModel != null) txtModel.Text = "";
+                    if (txtType != null) txtType.Text = "";
+                }
+                _lastRawQR = "";
                 _macDirty = false;
                 _pendingSnNoModel = false;
             }
-            catch { }
+            finally { EndFieldEventScope(); }
+        }
+
+        private void BeginDeviceReadTransaction()
+        {
+            if (_deviceEntryActive) return;
+            ClearDeviceValuesForNewRead();
+            _deviceEntryActive = true;
         }
 
         private bool IsModelTypeLocked
@@ -5145,6 +5176,7 @@ namespace LabelPrinterApp
             if (input == null) return ScanFeed.Ignored;
             string s = input.Trim();
             if (s.Length == 0) return ScanFeed.Ignored;
+            BeginDeviceReadTransaction();
 
             if (_deviceKindStb) return ProcessStbScan(s, fromCamera);
 
@@ -5356,6 +5388,7 @@ namespace LabelPrinterApp
         private void SaveAndPrintCore(bool clearAfter)
         {
             var rec = CurrentRecord();
+            if (!ReconcileOnuPairWithLookup(rec)) return;
             string verr = ValidateForPrint();
             if (verr != null)
             {
@@ -5436,6 +5469,50 @@ namespace LabelPrinterApp
                 UpdatePreview();
             }
             UpdateTodayCount();
+        }
+
+        private bool ReconcileOnuPairWithLookup(DeviceRecord rec)
+        {
+            if (rec == null || IsStbRecord(rec)) return true;
+            string sn = (rec.SN ?? "").Trim().ToUpperInvariant();
+            string mac = QRParser.NormalizeMac(rec.MAC ?? "") ?? "";
+            if (sn.Length == 0 || mac.Length == 0) return true;
+            try
+            {
+                var ext = ShellApp.ExternalDeviceLookup.Find(rec.SN, null);
+                string expected = ext == null ? "" : (QRParser.NormalizeMac(ext.Mac ?? "") ?? "");
+                if (expected.Length > 0 && !string.Equals(expected, mac, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShellApp.AppLog.Write("识别", "扫码 MAC 与入库/检测不一致，已按 SN 校正：SN=" + rec.SN
+                                               + "，扫码 MAC=" + mac + "，正确 MAC=" + expected);
+                    rec.MAC = expected;
+                    if (txtMAC != null) txtMAC.Text = expected;
+                    _macDirty = true;
+                    return true;
+                }
+            }
+            catch { }
+
+            string otherSn = "";
+            foreach (var r in _records)
+            {
+                string oldMac = QRParser.NormalizeMac(r.MAC ?? "") ?? "";
+                if (string.Equals(oldMac, mac, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals((r.SN ?? "").Trim(), sn, StringComparison.OrdinalIgnoreCase))
+                {
+                    otherSn = (r.SN ?? "").Trim();
+                    break;
+                }
+            }
+            if (otherSn.Length > 0)
+            {
+                Notify("扫码 MAC 与当前 SN 不一致：该 MAC 在历史中属于 " + otherSn
+                       + "。本次不打印，请重新扫描 MAC。", Color.Red, true);
+                ShellApp.AppLog.Write("识别", "拒绝错误配对：SN=" + rec.SN + "，MAC=" + mac
+                                           + "，历史归属=" + otherSn);
+                return false;
+            }
+            return true;
         }
 
         // 校验将要打印的元素：勾选要打印的内容，若对应内容缺失则提示并禁止打印
@@ -5671,6 +5748,7 @@ namespace LabelPrinterApp
         internal void CamDeviceGone()
         {
             _pendingSnNoModel = false;
+            _deviceEntryActive = false;
         }
 
         // 仅自测：看看输入框里现在是什么（验证“换了一台不会留着上一台的 MAC”）
@@ -5681,6 +5759,51 @@ namespace LabelPrinterApp
                 return "型号=" + txtModel.Text + " 类型=" + txtType.Text + " SN=" + txtSN.Text + " MAC=" + txtMAC.Text;
             }
             catch { return ""; }
+        }
+
+        internal string TestAtomicFieldReset()
+        {
+            try
+            {
+                bool oldAuto = chkAuto.Checked;
+                bool oldLock = chkLockModelType.Checked;
+                chkAuto.Checked = false;
+                chkLockModelType.Checked = false;
+                TestSetDeviceKind(false);
+                SetMode(false);
+                ClearInputs(false);
+                BeginFieldEventScope();
+                try
+                {
+                    txtModel.Text = "STALE-MODEL";
+                    txtType.Text = "GPON";
+                    txtSN.Text = "STALESN00001";
+                    txtSTBID.Text = "STALESTBID00000000000000001";
+                    txtMAC.Text = "AABBCCDDEEFF";
+                }
+                finally { EndFieldEventScope(); }
+                _deviceEntryActive = false;
+                string qr = "http://op.smartont.net/app/download?model=GPON&type=TEWA-802G"
+                          + "&sn=SCTYNEW00001&serialnumber=0443FD-01FFFFFFFF011FFF21SCTYNEW000011&ip=192.168.1.1";
+                ProcessScanText(qr, true);
+                string got = "型号=" + txtModel.Text + " 类型=" + txtType.Text
+                           + " SN=" + txtSN.Text + " STBID=" + txtSTBID.Text + " MAC=" + txtMAC.Text;
+                chkAuto.Checked = oldAuto;
+                chkLockModelType.Checked = oldLock;
+                return got;
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        internal string TestReconcileOnuPair(string sn, string mac)
+        {
+            try
+            {
+                var rec = new DeviceRecord { SN = sn, MAC = mac, Model = "G-140W-UG", Type = "GPON" };
+                bool ok = ReconcileOnuPairWithLookup(rec);
+                return "允许打印=" + ok + " 校正后MAC=" + (rec.MAC ?? "");
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
         // 仅自测：第一台没有二维码，SN/MAC 已扫但缺型号/类型，打印被拦下；
@@ -5933,10 +6056,7 @@ namespace LabelPrinterApp
                         newDevice = false;                    // 分不清是哪台：不动已有内容，也不打印（下面会走 Partial）
                     if (newDevice)
                     {
-                        if (!_fixedModel && !IsModelTypeLocked) { txtModel.Text = ""; txtType.Text = ""; }
-                        txtSN.Text = "";
-                        txtMAC.Text = "";
-                        _macDirty = false;
+                        ClearDeviceValuesForNewRead();
                     }
                 }
 
@@ -6487,6 +6607,7 @@ namespace LabelPrinterApp
         private void ClearInputs(bool keepModelType)
         {
             StopExternalLookupDelay();
+            _deviceEntryActive = false;
             _macDirty = false;
             _pendingSnNoModel = false;
             _lastRawQR = "";
